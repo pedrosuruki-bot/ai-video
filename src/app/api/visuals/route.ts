@@ -117,6 +117,34 @@ export async function POST(req: Request) {
     });
   } catch (error) {
     console.error("OpenAI image error:", error);
-    return NextResponse.json({ error: "A geração de imagem com IA falhou." }, { status: 502 });
+
+    // AI image generation can fail because of temporary provider limits,
+    // billing/quota, or model availability. For a usable CapCut export,
+    // fall back to a licensed Wikimedia Commons result instead of returning
+    // an empty asset.
+    try {
+      const fallbackQuery = prompt
+        .split(/[,;:.!?]/)[0]
+        .split(/\\s+/)
+        .slice(0, 6)
+        .join(" ");
+
+      const results = await searchWikimedia(fallbackQuery);
+      if (results.length) {
+        return NextResponse.json({
+          mode: "stock",
+          source: "Wikimedia Commons (fallback)",
+          warning: "A imagem IA falhou; foi usada uma imagem de stock/licenciada como fallback.",
+          results,
+          selected: results[0],
+        });
+      }
+    } catch (fallbackError) {
+      console.error("Wikimedia fallback error:", fallbackError);
+    }
+
+    return NextResponse.json({
+      error: "A imagem IA falhou e não foi encontrado fallback no Wikimedia Commons.",
+    }, { status: 502 });
   }
 }

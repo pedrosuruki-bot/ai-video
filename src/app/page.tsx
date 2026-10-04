@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { Analysis, Scene, Settings } from "@/lib/types";
 
 const demo =
@@ -42,7 +42,7 @@ export default function Home() {
   const [voices, setVoices] = useState<Record<string, string>>({});
   const [renderId, setRenderId] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState("");
-  const [showAll, setShowAll] = useState(false);
+  const [showAll, setShowAll] = useState(false);\n  const [health, setHealth] = useState<{openai:boolean;image:boolean;stock:boolean;render:boolean} | null>(null);\n\n  useEffect(() => {\n    fetch("/api/health").then((r) => r.json()).then(setHealth).catch(() => setHealth(null));\n  }, []);
 
   const words = useMemo(
     () => script.trim().split(/\s+/).filter(Boolean).length,
@@ -242,7 +242,7 @@ export default function Home() {
     <div className="app">
       <header>
         <div className="brand">✦ <span>AI</span> VIDEO FACTORY</div>
-        <div className="header-right">Long-form YouTube Studio <span className="live-dot">●</span></div>
+        <div className="header-right">Long-form YouTube Studio <span className="health-chip">AI {health?.openai ? "READY" : "CONFIGURE"}</span><span className="health-chip">RENDER {health?.render ? "READY" : "OPTIONAL"}</span></div>
       </header>
 
       <main className="wrap">

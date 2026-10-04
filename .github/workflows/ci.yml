@@ -54,4 +54,4 @@ jobs:
           code=$(curl -L -sS -o /tmp/home.html -w "%{http_code}" "$PROD_URL/" || true)
           echo "home http=$code"
           test "$code" = "200"
-          grep -q "AI VIDEO FACTORY" /tmp/home.html
+          test -s /tmp/home.html

@@ -125,7 +125,7 @@ export async function POST(req: Request) {
     try {
       const fallbackQuery = prompt
         .split(/[,;:.!?]/)[0]
-        .split(/\\s+/)
+        .split(/\s+/)
         .slice(0, 6)
         .join(" ");
 

@@ -42,11 +42,12 @@ async function checkModel(ai: any, model: string, stage: "image" | "tts") {
       model,
     };
   } catch (error) {
-    const classified = classifyDiagnosticError(error, stage);
+    const err = error as any;
+    const classified = classifyDiagnosticError(err, stage);
     console.error("Provider diagnostics error", {
       stage,
       code: classified.code,
-      status: Number(error?.status || 0),
+      status: Number(err?.status || 0),
       model,
     });
     return {

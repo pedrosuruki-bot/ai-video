@@ -52,6 +52,7 @@ export default function Home() {
     status: "pending" as "pending" | "blocked" | "complete",
     errors: [] as string[],
   });
+  const [validatedMedia, setValidatedMedia] = useState({ images: 0, audio: 0 });
 
   async function refreshDiagnostics() {
     try {
@@ -455,6 +456,8 @@ export default function Home() {
     setPackageBusy(true);
     setBusy(true);
     setAssetErrors({});
+    setValidatedMedia({ images: 0, audio: 0 });
+    setExportValidation({ status: "pending", errors: [] });
 
     try {
       const storyboardErrors = validateStoryboard(data.scenes);
@@ -502,6 +505,7 @@ export default function Home() {
           try {
             const imageBlob = await fetchExportAsset(imageUrl);
             imageBlobs[scene.id] = await normalizeImageToJpeg(imageBlob);
+            setValidatedMedia((v) => ({ ...v, images: v.images + 1 }));
           } catch (e) {
             validationErrors.push(
               sceneLabel + ": imagem não pôde ser descarregada (" +
@@ -528,6 +532,7 @@ export default function Home() {
               throw new Error("AUDIO_DOWNLOAD_ERROR: ficheiro de áudio vazio, não-MP3 ou Content-Type inválido.");
             }
             audioBlobs[scene.id] = new Blob([audioBytes], { type: "audio/mpeg" });
+            setValidatedMedia((v) => ({ ...v, audio: v.audio + 1 }));
           } catch (e) {
             validationErrors.push(
               sceneLabel + ": áudio não pôde ser descarregado (" +
@@ -545,6 +550,7 @@ export default function Home() {
       if (validAudio !== totalScenes) validationErrors.push("Áudio: " + validAudio + "/" + totalScenes + " válidos.");
 
       if (validationErrors.length > 0) {
+        setExportValidation({ status: "blocked", errors: validationErrors });
         throw new Error(
           "EXPORTAÇÃO BLOQUEADA — o projeto não está 100% completo.\\n\\n" +
           validationErrors.slice(0, 20).join("\\n") +
@@ -592,7 +598,10 @@ export default function Home() {
       }
 
       const fullScript = data.scenes.map((s) => s.narration.trim()).join("\n\n");
-      if (!fullScript.trim()) throw new Error("EXPORTAÇÃO BLOQUEADA — full-script vazio.");
+      if (!fullScript.trim()) {
+        setExportValidation({ status: "blocked", errors: ["full-script vazio."] });
+        throw new Error("EXPORTAÇÃO BLOQUEADA — full-script vazio.");
+      }
 
       const csvEscape = (value: string | number) => '"' + String(value).replace(/"/g, '""') + '"';
       const csv = [
@@ -685,9 +694,10 @@ export default function Home() {
       setProgress("100% completo — pacote CapCut pronto com " + totalScenes + "/" + totalScenes + " cenas.");
     } catch (e) {
       const message = e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.";
-      if (!message.startsWith("EXPORTAÇÃO BLOQUEADA")) {
-        setExportValidation({ status: "blocked", errors: [message] });
-      }
+      setExportValidation({
+        status: "blocked",
+        errors: message.split("\\n").filter(Boolean).slice(0, 20),
+      });
       setProgress(message);
     } finally {
       setPackageBusy(false);
@@ -844,8 +854,8 @@ export default function Home() {
                 <div className="validation-title">VALIDAÇÃO DO PROJETO</div>
                 <div className="validation-grid">
                   <span>Storyboard <b>{data.scenes.length}/{data.scenes.length}</b></span>
-                  <span>Imagens <b>{visualCount}/{data.scenes.length}</b></span>
-                  <span>Áudio <b>{voiceCount}/{data.scenes.length}</b></span>
+                  <span>Imagens <b>{validatedMedia.images}/{data.scenes.length}</b></span>
+                  <span>Áudio <b>{validatedMedia.audio}/{data.scenes.length}</b></span>
                   <span>SRT <b>{exportValidation.status === "complete" ? "✓ válido" : "pendente"}</b></span>
                   <span>VTT <b>{exportValidation.status === "complete" ? "✓ válido" : "pendente"}</b></span>
                   <span>Timeline <b>{exportValidation.status === "complete" ? data.scenes.length + "/" + data.scenes.length : "pendente"}</b></span>

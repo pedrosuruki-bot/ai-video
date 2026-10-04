@@ -4,6 +4,8 @@ type Scene = {
   narration?: string;
   duration?: number;
   visualUrl?: string;
+  visualType?: string;
+  visualPrompt?: string;
 };
 
 function dimensions(aspectRatio: string) {
@@ -19,6 +21,7 @@ function renderScript(body: any) {
 
   for (const scene of (body.scenes || []) as Scene[]) {
     const duration = Math.max(1, Number(scene.duration) || 4);
+    const type = String(scene.visualType || "");
 
     if (scene.visualUrl) {
       elements.push({
@@ -28,10 +31,27 @@ function renderScript(body: any) {
         duration,
         fit: "cover",
       });
+    } else if (type === "ai-image" && scene.visualPrompt) {
+      // Creatomate can ask a connected image provider to generate the asset at render time.
+      elements.push({
+        type: "image",
+        source: scene.visualPrompt,
+        provider: process.env.CREATOMATE_IMAGE_PROVIDER || "openai",
+        time: cursor,
+        duration,
+        fit: "cover",
+      });
+    } else if (type === "ai-video" && scene.visualPrompt && process.env.CREATOMATE_VIDEO_PROVIDER) {
+      elements.push({
+        type: "video",
+        source: scene.visualPrompt,
+        provider: process.env.CREATOMATE_VIDEO_PROVIDER,
+        time: cursor,
+        duration,
+        fit: "cover",
+      });
     }
 
-    // Optional provider-generated voice. The exact provider configuration
-    // is intentionally controlled by the project environment.
     if (scene.narration && process.env.CREATOMATE_VOICE_PROVIDER) {
       elements.push({
         type: "audio",
@@ -110,7 +130,11 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({ configured: true, provider: "Creatomate", render: data });
+    return NextResponse.json({
+      configured: true,
+      provider: "Creatomate",
+      render: data,
+    });
   } catch (error) {
     console.error("Render error:", error);
     return NextResponse.json({ error: "Erro a iniciar o render cloud." }, { status: 502 });

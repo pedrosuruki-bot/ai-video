@@ -70,7 +70,8 @@ function cleanStockQuery(input: string) {
     "glance","style","realistic","editorial","long","form","youtube","video","imagem","imagem","mostrar",
     "mostra","cena","filmagem","professional","slow","camera","soft","cut","the","a","an","and","with",
     "para","uma","um","de","da","do","das","dos","que","como","porque","quando","esta","este","isso",
-    "sobre","em","por","na","no","nas","nos","ao","aos","e","ou"
+    "sobre","em","por","na","no","nas","nos","ao","aos","e","ou","simple","clean","white","photograph",
+    "photo","realism","realistic","professional","generic","illustrating","description"
   ]);
 
   const text = String(input || "")
@@ -92,13 +93,16 @@ function cleanStockQuery(input: string) {
 
 async function searchWikimedia(query: string) {
   const cleaned = cleanStockQuery(query);
+  const compactWords = cleaned.split(/\s+/).filter(Boolean);
   const rawCandidates = [
     cleaned,
+    compactWords.slice(0, 3).join(" "),
+    compactWords.slice(0, 2).join(" "),
+    compactWords.slice(0, 1).join(" "),
     String(query || "").split(/[,:;.!?]/)[0].trim(),
-    String(query || "").split(/\s+/).slice(0, 6).join(" ").trim(),
   ];
 
-  const candidates = Array.from(new Set(rawCandidates.filter((value) => value.length >= 3)));
+  const candidates = Array.from(new Set(rawCandidates.filter((value) => value.length >= 2)));
 
   for (const candidate of candidates) {
     const params = new URLSearchParams({

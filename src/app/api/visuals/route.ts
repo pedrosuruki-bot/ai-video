@@ -112,8 +112,9 @@ async function searchWikimedia(query: string) {
       gsrnamespace: "6",
       gsrlimit: "8",
       prop: "imageinfo",
-      iiprop: "url|mime|extmetadata|size",
+      iiprop: "url|mime|thumbmime|extmetadata|size",
       iiurlwidth: "1280",
+      iiurlheight: "1280",
       format: "json",
       origin: "*",
     });
@@ -158,7 +159,7 @@ async function searchWikimedia(query: string) {
         return {
           title: String(page.title || "").replace(/^File:/, ""),
           imageUrl: String(info.thumburl || info.url),
-          mime: String(info.mime || ""),
+          mime: String(info.thumbmime || info.mime || ""),
           size: Number(info.size || 0),
           pageUrl: String(info.descriptionurl || ("https://commons.wikimedia.org/wiki/" + encodeURIComponent(page.title))),
           license: String(meta.LicenseShortName?.value || meta.License?.value || "Wikimedia Commons"),
@@ -171,8 +172,6 @@ async function searchWikimedia(query: string) {
           const mime = item.mime.toLowerCase();
           return IMAGE_HOSTS.has(host) &&
             item.imageUrl.startsWith("https://") &&
-            item.size > 0 &&
-            item.size <= 15 * 1024 * 1024 &&
             ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(mime);
         } catch {
           return false;

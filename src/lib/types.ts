@@ -23,6 +23,15 @@ export type Scene = {
   visualCredit?: string;
 };
 
+export type AssetError = {
+  code: string;
+  message: string;
+  stage?: string;
+  provider?: string;
+  retryable?: boolean;
+  detail?: string;
+};
+
 export type Analysis = {
   title: string;
   summary: string;

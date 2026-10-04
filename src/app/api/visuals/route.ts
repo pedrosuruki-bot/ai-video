@@ -113,7 +113,13 @@ export async function POST(req: Request) {
     try {
       const results = await searchWikimedia(prompt);
       if (!results.length) {
-        return NextResponse.json({ error: "Não encontrei um visual para esta pesquisa." }, { status: 404 });
+        return NextResponse.json({
+          error: "Não encontrei um visual para esta pesquisa.",
+          code: "WIKIMEDIA_NO_RESULTS",
+          stage: "image",
+          provider: "Wikimedia Commons",
+          query: prompt,
+        }, { status: 404 });
       }
       return NextResponse.json({
         mode: "stock",
@@ -123,7 +129,14 @@ export async function POST(req: Request) {
       });
     } catch (error) {
       console.error("Visual stock error:", error);
-      return NextResponse.json({ error: "Falha ao procurar imagens no Wikimedia Commons." }, { status: 502 });
+      return NextResponse.json({
+        error: "Falha ao procurar imagens no Wikimedia Commons.",
+        code: "WIKIMEDIA_SEARCH_ERROR",
+        stage: "image",
+        provider: "Wikimedia Commons",
+        detail: error instanceof Error ? error.message : String(error),
+        query: prompt,
+      }, { status: 502 });
     }
   }
 
@@ -138,6 +151,11 @@ export async function POST(req: Request) {
 
   const imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-flare";
   let lastError: any = null;
+  const fallbackQuery = prompt
+    .split(/[,;:.!?]/)[0]
+    .split(/\s+/)
+    .slice(0, 6)
+    .join(" ");
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -182,12 +200,6 @@ export async function POST(req: Request) {
     // fall back to a licensed Wikimedia Commons result instead of returning
     // an empty asset.
     try {
-      const fallbackQuery = prompt
-        .split(/[,;:.!?]/)[0]
-        .split(/\s+/)
-        .slice(0, 6)
-        .join(" ");
-
       const results = await searchWikimedia(fallbackQuery);
       if (results.length) {
         const classified = classifyProviderError(lastError);

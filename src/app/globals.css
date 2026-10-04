@@ -11,3 +11,16 @@
 .health-chip {
   white-space: nowrap;
 }
+
+
+.validation-box{margin:0 18px 18px;padding:14px;border-radius:12px;background:#0b0d12;border:1px solid #ffffff0e}
+.validation-title{font-size:11px;font-weight:900;letter-spacing:.08em;color:#cdd1df;margin-bottom:10px}
+.validation-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.validation-grid span{display:flex;justify-content:space-between;gap:8px;padding:8px 9px;border-radius:8px;background:#11141c;color:#858b9e;font-size:11px}
+.validation-grid b{color:#dfe2ec}
+.validation-status{margin-top:10px;font-size:12px;font-weight:900}
+.validation-box.pending .validation-status{color:#aeb4c4}
+.validation-box.blocked .validation-status{color:#ff8f9f}
+.validation-box.complete .validation-status{color:#4ade80}
+.validation-errors{margin-top:8px;display:grid;gap:5px;color:#ff8f9f;font-size:11px;line-height:1.4}
+@media(max-width:900px){.validation-grid{grid-template-columns:repeat(2,1fr)}}

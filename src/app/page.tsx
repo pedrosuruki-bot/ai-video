@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import JSZip from "jszip";
-import type { Analysis, Scene, Settings } from "@/lib/types";
+import type { Analysis, AssetError, Scene, Settings } from "@/lib/types";
 
 const demo =
   "Há uma razão pela qual algumas coisas que vemos todos os dias parecem completamente normais. " +
@@ -45,10 +45,23 @@ export default function Home() {
   const [renderId, setRenderId] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState("");
   const [showAll, setShowAll] = useState(false);
-  const [health, setHealth] = useState<{openai:boolean;image:boolean;stock:boolean;render:boolean} | null>(null);
+  const [health, setHealth] = useState<any>(null);
+  const [assetErrors, setAssetErrors] = useState<Record<string, AssetError>>({});
+
+  async function refreshDiagnostics() {
+    try {
+      const r = await fetch("/api/diagnostics", { cache: "no-store" });
+      const d = await r.json();
+      setHealth(d);
+      return d;
+    } catch {
+      setHealth({ status: "error" });
+      return null;
+    }
+  }
 
   useEffect(() => {
-    fetch("/api/health").then((r) => r.json()).then(setHealth).catch(() => setHealth(null));
+    void refreshDiagnostics();
   }, []);
 
   const words = useMemo(
@@ -86,7 +99,21 @@ export default function Home() {
     }
   }
 
-  async function generateVisual(scene: Scene): Promise<string | null> {
+  function parseApiError(d: any, fallback: string, stage: string): AssetError {
+    return {
+      code: String(d?.code || (stage === "image" ? "IMAGE_PROVIDER_ERROR" : "TTS_PROVIDER_ERROR")),
+      message: String(d?.error || fallback),
+      stage,
+      provider: d?.provider,
+      retryable: Boolean(d?.retryable),
+      detail: d?.detail,
+    };
+  }
+
+  async function generateVisual(
+    scene: Scene,
+    errorSink?: (error: AssetError) => void
+  ): Promise<string | null> {
     setProgress("A gerar visual da cena " + scene.index + "…");
     try {
       const mode = selectedMode(scene);
@@ -104,20 +131,71 @@ export default function Home() {
           style: settings.style,
         }),
       });
-      const d = await r.json();
-      if (!r.ok) throw new Error(d.error || "Não foi possível gerar o visual.");
+
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        const error = parseApiError(d, "Não foi possível gerar o visual.", "image");
+        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+        errorSink?.(error);
+        throw new Error(error.code + ": " + error.message);
+      }
+
       const selected = d.selected;
       const imageUrl = d.imageUrl || selected?.imageUrl;
-      if (!imageUrl) throw new Error("A resposta não trouxe uma imagem.");
+      if (!imageUrl) {
+        const error: AssetError = {
+          code: "IMAGE_RESPONSE_EMPTY",
+          message: "A API respondeu sem uma imagem utilizável.",
+          stage: "image",
+          provider: d.source,
+          retryable: false,
+        };
+        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+        errorSink?.(error);
+        throw new Error(error.code + ": " + error.message);
+      }
+
       setVisuals((v) => ({ ...v, [scene.id]: imageUrl }));
       setVisualMeta((v) => ({
         ...v,
         [scene.id]: d.source + (selected?.license ? " • " + selected.license : ""),
       }));
+
+      if (d.warning && d.originalProviderError) {
+        const fallbackError: AssetError = {
+          code: String(d.originalProviderError.code || "IMAGE_FALLBACK_USED"),
+          message: String(d.warning),
+          stage: "image",
+          provider: "Wikimedia Commons",
+          retryable: false,
+          detail: String(d.originalProviderError.message || ""),
+        };
+        setAssetErrors((v) => ({ ...v, [scene.id]: fallbackError }));
+      } else {
+        setAssetErrors((v) => {
+          const next = { ...v };
+          delete next[scene.id];
+          return next;
+        });
+      }
+
       setProgress("Visual da cena " + scene.index + " pronto.");
       return imageUrl;
     } catch (e) {
-      setProgress(e instanceof Error ? e.message : "Erro visual.");
+      const error: AssetError = e instanceof Error && e.message.includes(": ")
+        ? {
+            code: e.message.split(": ")[0] || "IMAGE_PROVIDER_ERROR",
+            message: e.message.split(": ").slice(1).join(": ") || e.message,
+            stage: "image",
+          }
+        : {
+            code: "IMAGE_PROVIDER_ERROR",
+            message: e instanceof Error ? e.message : "Erro visual.",
+            stage: "image",
+          };
+      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+      errorSink?.(error);
+      setProgress(error.code + ": " + error.message);
       return null;
     }
   }
@@ -134,7 +212,10 @@ export default function Home() {
     setProgress("Pré-visualização visual concluída.");
   }
 
-  async function generateVoice(scene: Scene): Promise<string | null> {
+  async function generateVoice(
+    scene: Scene,
+    errorSink?: (error: AssetError) => void
+  ): Promise<string | null> {
     setProgress("A gerar voz da cena " + scene.index + "…");
     try {
       const r = await fetch("/api/tts", {
@@ -146,19 +227,55 @@ export default function Home() {
           speed: 1,
         }),
       });
+
+      const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const d = await r.json().catch(() => ({ error: "Erro de voz." }));
-        throw new Error(d.error);
+        const error = parseApiError(d, "Erro de voz.", "audio");
+        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+        errorSink?.(error);
+        throw new Error(error.code + ": " + error.message);
       }
+
       const blob = await r.blob();
+      if (!blob.size || !String(blob.type || "").startsWith("audio/")) {
+        const error: AssetError = {
+          code: "AUDIO_RESPONSE_INVALID",
+          message: "A API devolveu um áudio vazio ou com formato inválido.",
+          stage: "audio",
+          provider: "OpenAI",
+          retryable: false,
+        };
+        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+        errorSink?.(error);
+        throw new Error(error.code + ": " + error.message);
+      }
+
       const url = URL.createObjectURL(blob);
       const old = voices[scene.id];
       if (old) URL.revokeObjectURL(old);
       setVoices((v) => ({ ...v, [scene.id]: url }));
+      setAssetErrors((v) => {
+        const next = { ...v };
+        delete next[scene.id];
+        return next;
+      });
       setProgress("Voz da cena " + scene.index + " pronta. Voz gerada por IA.");
       return url;
     } catch (e) {
-      setProgress(e instanceof Error ? e.message : "Erro de voz.");
+      const error: AssetError = e instanceof Error && e.message.includes(": ")
+        ? {
+            code: e.message.split(": ")[0] || "TTS_PROVIDER_ERROR",
+            message: e.message.split(": ").slice(1).join(": ") || e.message,
+            stage: "audio",
+          }
+        : {
+            code: "TTS_PROVIDER_ERROR",
+            message: e instanceof Error ? e.message : "Erro de voz.",
+            stage: "audio",
+          };
+      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+      errorSink?.(error);
+      setProgress(error.code + ": " + error.message);
       return null;
     }
   }
@@ -195,13 +312,21 @@ export default function Home() {
   }
 
   async function fetchExportAsset(url: string) {
-    if (url.startsWith("data:")) {
-      const r = await fetch(url);
-      return r.blob();
+    const r = url.startsWith("data:")
+      ? await fetch(url)
+      : await fetch("/api/asset-proxy?url=" + encodeURIComponent(url));
+
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      throw new Error(String(d?.code || "IMAGE_DOWNLOAD_ERROR") + ": " + String(d?.error || "Não foi possível descarregar uma imagem."));
     }
-    const r = await fetch("/api/asset-proxy?url=" + encodeURIComponent(url));
-    if (!r.ok) throw new Error("Não foi possível descarregar uma imagem.");
-    return r.blob();
+
+    const blob = await r.blob();
+    const type = String(blob.type || "");
+    if (!blob.size || !type.startsWith("image/")) {
+      throw new Error("IMAGE_DOWNLOAD_ERROR: o ficheiro descarregado não é uma imagem válida.");
+    }
+    return blob;
   }
 
   async function fetchCaptionText(format: "srt" | "vtt") {
@@ -224,84 +349,113 @@ export default function Home() {
       .toUpperCase() || "PROJETO";
   }
 
+  function validateStoryboard(scenes: Scene[]) {
+    const errors: string[] = [];
+    if (!scenes.length) errors.push("O storyboard não contém cenas.");
+    scenes.forEach((scene, i) => {
+      if (!scene.id) errors.push("Cena " + (i + 1) + ": id em falta.");
+      if (!scene.narration?.trim()) errors.push("Cena " + (i + 1) + ": narração em falta.");
+      if (!(Number(scene.duration) > 0)) errors.push("Cena " + (i + 1) + ": duração inválida.");
+      if (!scene.visualPrompt?.trim() && !scene.searchQueries?.length) {
+        errors.push("Cena " + (i + 1) + ": prompt/query visual em falta.");
+      }
+      if (!scene.camera?.trim()) errors.push("Cena " + (i + 1) + ": câmera em falta.");
+      if (!scene.transition?.trim()) errors.push("Cena " + (i + 1) + ": transição em falta.");
+    });
+    return errors;
+  }
+
+  function validateCaptionText(text: string, format: "srt" | "vtt", expected: number) {
+    if (!text.trim()) return "Legenda " + format.toUpperCase() + " vazia.";
+    const cueCount = format === "vtt"
+      ? (text.match(/\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+-->\\s+/g) || []).length
+      : (text.match(/\\d{2}:\\d{2}:\\d{2},\\d{3}\\s+-->\\s+/g) || []).length;
+    if (cueCount !== expected) {
+      return "Legenda " + format.toUpperCase() + " incompleta: " + cueCount + "/" + expected + " cues.";
+    }
+    if (/-->\\s*-->/.test(text)) return "Legenda " + format.toUpperCase() + " contém timestamps inválidos.";
+    return "";
+  }
+
   async function exportCapCutPackage() {
     if (!data || packageBusy) return;
 
     setPackageBusy(true);
     setBusy(true);
+    setAssetErrors({});
 
     try {
-      /*
-       * REGRA DE 100%:
-       * O ZIP NUNCA É COMPRIMIDO se existir uma única cena sem imagem
-       * ou áudio válido. Também validamos SRT/VTT antes de criar o ZIP.
-       * Nada de pacotes "quase prontos". Humanos já têm ficheiros
-       * suficientes chamados final_v2_REAL_FINAL_agora.zip.
-       */
+      const storyboardErrors = validateStoryboard(data.scenes);
+      if (storyboardErrors.length) {
+        throw new Error("EXPORTAÇÃO BLOQUEADA — storyboard inválido.\\n\\n" + storyboardErrors.join("\\n"));
+      }
+
       const zip = new JSZip();
       const imageMap: Record<string, string> = { ...visuals };
       const voiceMap: Record<string, string> = { ...voices };
       const imageBlobs: Record<string, Blob> = {};
       const audioBlobs: Record<string, Blob> = {};
       const validationErrors: string[] = [];
+      const generationErrors: Record<string, AssetError[]> = {};
+
+      const addGenerationError = (sceneId: string, error: AssetError) => {
+        generationErrors[sceneId] = [...(generationErrors[sceneId] || []), error];
+      };
 
       for (let i = 0; i < data.scenes.length; i++) {
         const scene = data.scenes[i];
         const sceneLabel = "Cena " + String(scene.index).padStart(3, "0");
-        setProgress(
-          "A preparar assets " + (i + 1) + "/" + data.scenes.length + "…"
-        );
+        setProgress("A preparar assets " + (i + 1) + "/" + data.scenes.length + "…");
 
         if (!imageMap[scene.id]) {
-          const url = await generateVisual(scene);
+          const url = await generateVisual(scene, (error) => addGenerationError(scene.id, error));
           if (url) imageMap[scene.id] = url;
         }
 
         if (!voiceMap[scene.id]) {
-          const url = await generateVoice(scene);
+          const url = await generateVoice(scene, (error) => addGenerationError(scene.id, error));
           if (url) voiceMap[scene.id] = url;
         }
 
         const imageUrl = imageMap[scene.id];
         if (!imageUrl) {
-          validationErrors.push(sceneLabel + ": imagem em falta.");
+          const details = (generationErrors[scene.id] || []).filter((e) => e.stage === "image");
+          validationErrors.push(
+            sceneLabel + ": imagem em falta." +
+            (details.length ? " Causa: " + details[details.length - 1].code + " — " + details[details.length - 1].message : "")
+          );
         } else {
           try {
             const imageBlob = await fetchExportAsset(imageUrl);
-            if (!imageBlob.size) {
-              throw new Error("ficheiro de imagem vazio.");
-            }
             imageBlobs[scene.id] = imageBlob;
           } catch (e) {
             validationErrors.push(
-              sceneLabel +
-                ": imagem não pôde ser descarregada (" +
-                (e instanceof Error ? e.message : "erro desconhecido") +
-                ")."
+              sceneLabel + ": imagem não pôde ser descarregada (" +
+              (e instanceof Error ? e.message : "erro desconhecido") + ")."
             );
           }
         }
 
         const voiceUrl = voiceMap[scene.id];
         if (!voiceUrl) {
-          validationErrors.push(sceneLabel + ": áudio em falta.");
+          const details = (generationErrors[scene.id] || []).filter((e) => e.stage === "audio");
+          validationErrors.push(
+            sceneLabel + ": áudio em falta." +
+            (details.length ? " Causa: " + details[details.length - 1].code + " — " + details[details.length - 1].message : "")
+          );
         } else {
           try {
             const audioResponse = await fetch(voiceUrl);
-            if (!audioResponse.ok) {
-              throw new Error("resposta " + audioResponse.status + ".");
-            }
+            if (!audioResponse.ok) throw new Error("AUDIO_DOWNLOAD_ERROR: resposta " + audioResponse.status + ".");
             const audioBlob = await audioResponse.blob();
-            if (!audioBlob.size) {
-              throw new Error("ficheiro de áudio vazio.");
+            if (!audioBlob.size || !String(audioBlob.type || "").startsWith("audio/")) {
+              throw new Error("AUDIO_DOWNLOAD_ERROR: ficheiro de áudio vazio ou Content-Type inválido.");
             }
             audioBlobs[scene.id] = audioBlob;
           } catch (e) {
             validationErrors.push(
-              sceneLabel +
-                ": áudio não pôde ser descarregado (" +
-                (e instanceof Error ? e.message : "erro desconhecido") +
-                ")."
+              sceneLabel + ": áudio não pôde ser descarregado (" +
+              (e instanceof Error ? e.message : "erro desconhecido") + ")."
             );
           }
         }
@@ -311,47 +465,39 @@ export default function Home() {
       const validImages = Object.keys(imageBlobs).length;
       const validAudio = Object.keys(audioBlobs).length;
 
-      if (validImages !== totalScenes) {
-        validationErrors.push(
-          "Imagens: " + validImages + "/" + totalScenes + " válidas."
-        );
-      }
-
-      if (validAudio !== totalScenes) {
-        validationErrors.push(
-          "Áudio: " + validAudio + "/" + totalScenes + " válidos."
-        );
-      }
+      if (validImages !== totalScenes) validationErrors.push("Imagens: " + validImages + "/" + totalScenes + " válidas.");
+      if (validAudio !== totalScenes) validationErrors.push("Áudio: " + validAudio + "/" + totalScenes + " válidos.");
 
       if (validationErrors.length > 0) {
         throw new Error(
-          "EXPORTAÇÃO BLOQUEADA — o projeto não está 100% completo.\n\n" +
-            validationErrors.slice(0, 12).join("\n") +
-            (validationErrors.length > 12
-              ? "\n… e mais " + (validationErrors.length - 12) + " erro(s)."
-              : "")
+          "EXPORTAÇÃO BLOQUEADA — o projeto não está 100% completo.\\n\\n" +
+          validationErrors.slice(0, 20).join("\\n") +
+          (validationErrors.length > 20 ? "\\n… e mais " + (validationErrors.length - 20) + " erro(s)." : "")
         );
       }
 
       const srt = await fetchCaptionText("srt");
       const vtt = await fetchCaptionText("vtt");
-
-      if (!srt.trim() || !vtt.trim()) {
+      const srtError = validateCaptionText(srt, "srt", totalScenes);
+      const vttError = validateCaptionText(vtt, "vtt", totalScenes);
+      if (srtError || vttError) {
         throw new Error(
-          "EXPORTAÇÃO BLOQUEADA — as legendas SRT/VTT não foram geradas corretamente."
+          "EXPORTAÇÃO BLOQUEADA — legendas inválidas.\\n\\n" +
+          [srtError, vttError].filter(Boolean).join("\\n")
         );
       }
 
       let cursor = 0;
       const timeline = data.scenes.map((scene) => {
         const start = cursor;
-        const end = cursor + Math.max(1, Number(scene.duration) || 4);
+        const duration = Math.max(1, Number(scene.duration) || 0);
+        const end = cursor + duration;
         cursor = end;
         return {
           scene: scene.index,
           start,
           end,
-          duration: end - start,
+          duration,
           image: "media/images/" + String(scene.index).padStart(3, "0") + ".jpg",
           audio: "media/audio/" + String(scene.index).padStart(3, "0") + ".mp3",
           narration: scene.narration,
@@ -361,11 +507,14 @@ export default function Home() {
         };
       });
 
-      const csvEscape = (value: string | number) => {
-        const text = String(value).replace(/"/g, '""');
-        return '"' + text + '"';
-      };
+      if (timeline.length !== totalScenes || timeline.some((item) => !(item.end > item.start))) {
+        throw new Error("EXPORTAÇÃO BLOQUEADA — timeline inválida.");
+      }
 
+      const fullScript = data.scenes.map((s) => s.narration.trim()).join("\n\n");
+      if (!fullScript.trim()) throw new Error("EXPORTAÇÃO BLOQUEADA — full-script vazio.");
+
+      const csvEscape = (value: string | number) => '"' + String(value).replace(/"/g, '""') + '"';
       const csv = [
         "scene,start_seconds,end_seconds,duration_seconds,image,audio,narration",
         ...timeline.map((item) =>
@@ -381,16 +530,6 @@ export default function Home() {
         ),
       ].join("\n");
 
-      if (timeline.length !== totalScenes) {
-        throw new Error(
-          "EXPORTAÇÃO BLOQUEADA — timeline incompleta: " +
-            timeline.length +
-            "/" +
-            totalScenes +
-            " cenas."
-        );
-      }
-
       const guide = [
         "AI VIDEO FACTORY — PACOTE CAPCUT",
         "",
@@ -403,25 +542,15 @@ export default function Home() {
         "Idioma: " + settings.language,
         "",
         "CONTEÚDO",
-        "- media/images/: uma imagem válida por cena, em ordem numérica.",
-        "- media/audio/: uma narração MP3 válida por cena, em ordem numérica.",
-        "- captions.srt: legendas sincronizadas.",
-        "- captions.vtt: versão WebVTT.",
-        "- timeline.csv: início, fim, duração e ficheiros de cada cena.",
-        "- storyboard.json: prompts, narrativa e definições.",
+        "- media/images/: uma imagem válida por cena.",
+        "- media/audio/: uma narração MP3 válida por cena.",
+        "- captions.srt / captions.vtt: legendas.",
+        "- timeline.csv: tempos e assets.",
+        "- storyboard.json: storyboard e diagnóstico.",
         "- full-script.txt: roteiro completo.",
-        "",
-        "MONTAGEM",
-        "1. Importe as imagens pela ordem numérica.",
-        "2. Use timeline.csv para aplicar a duração indicada a cada imagem.",
-        "3. Importe os MP3 de áudio correspondentes e alinhe-os pelos mesmos números.",
-        "4. No CapCut Web/Desktop, importe captions.srt se quiser legendas editáveis.",
-        "5. No iPhone, o CapCut Mobile não importa SRT diretamente; pode sincronizar um projeto criado no Web/Desktop.",
-        "",
-        "NOTA: as imagens podem ser IA ou stock. A fonte/licença aparece no storyboard.json.",
+        "- VALIDACAO-100.txt: prova da validação.",
       ].join("\n");
 
-      // Só depois de TODA a validação passar é que adicionamos ficheiros ao ZIP.
       for (const scene of data.scenes) {
         const number = String(scene.index).padStart(3, "0");
         zip.file("media/images/" + number + ".jpg", imageBlobs[scene.id]);
@@ -431,75 +560,50 @@ export default function Home() {
       zip.file("captions.srt", srt);
       zip.file("captions.vtt", vtt);
       zip.file("timeline.csv", csv);
-      zip.file(
-        "storyboard.json",
-        JSON.stringify(
-          {
-            app: "AI Video Factory",
-            version: "0.4-capcut-100-percent",
-            validation: {
-              status: "100%",
-              scenes: totalScenes,
-              images: validImages,
-              audio: validAudio,
-              captions: "SRT + VTT",
-            },
-            settings,
-            analysis: data,
-            visualSources: visualMeta,
-            exportedAt: new Date().toISOString(),
-          },
-          null,
-          2
-        )
-      );
-      zip.file(
-        "full-script.txt",
-        data.scenes.map((s) => s.narration).join("\n\n")
-      );
+      zip.file("storyboard.json", JSON.stringify({
+        app: "AI Video Factory",
+        version: "0.5-capcut-100-percent-diagnostics",
+        validation: {
+          status: "100%",
+          scenes: totalScenes,
+          images: validImages,
+          audio: validAudio,
+          captions: "SRT + VTT",
+          timeline: timeline.length,
+        },
+        settings,
+        analysis: data,
+        visualSources: visualMeta,
+        assetErrors,
+        exportedAt: new Date().toISOString(),
+      }, null, 2));
+      zip.file("full-script.txt", fullScript);
       zip.file("GUIA-CAPCUT.txt", guide);
-      zip.file(
-        "VALIDACAO-100.txt",
-        [
-          "EXPORTAÇÃO VALIDADA: 100%",
-          "",
-          "Cenas: " + totalScenes + "/" + totalScenes,
-          "Imagens válidas: " + validImages + "/" + totalScenes,
-          "Áudios válidos: " + validAudio + "/" + totalScenes,
-          "Legendas: SRT + VTT",
-          "Timeline: " + timeline.length + "/" + totalScenes + " cenas",
-          "",
-          "REGRA: se algum asset estivesse em falta ou inválido, o ZIP não seria criado.",
-        ].join("\n")
-      );
+      zip.file("VALIDACAO-100.txt", [
+        "EXPORTAÇÃO VALIDADA: 100%",
+        "",
+        "Cenas: " + totalScenes + "/" + totalScenes,
+        "Imagens válidas: " + validImages + "/" + totalScenes,
+        "Áudios válidos: " + validAudio + "/" + totalScenes,
+        "Legendas: SRT + VTT válidos",
+        "Timeline: " + timeline.length + "/" + totalScenes,
+        "",
+        "REGRA: se qualquer asset estivesse em falta ou inválido, o ZIP não seria criado.",
+      ].join("\n"));
 
       setProgress("100% validado. A compactar o projeto…");
       const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
-      if (!blob.size) {
-        throw new Error(
-          "EXPORTAÇÃO BLOQUEADA — o ZIP final foi criado sem conteúdo válido."
-        );
-      }
+      if (!blob.size) throw new Error("EXPORTAÇÃO BLOQUEADA — ZIP vazio.");
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = "VYNKO_" + slugify(data.title) + "_CAPCUT.zip";
       a.click();
-      URL.revokeObjectURL(url);
-      setProgress(
-        "100% completo — pacote CapCut pronto com " +
-          totalScenes +
-          "/" +
-          totalScenes +
-          " cenas."
-      );
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setProgress("100% completo — pacote CapCut pronto com " + totalScenes + "/" + totalScenes + " cenas.");
     } catch (e) {
-      setProgress(
-        e instanceof Error
-          ? e.message
-          : "Falha ao criar o pacote CapCut."
-      );
+      setProgress(e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.");
     } finally {
       setPackageBusy(false);
       setBusy(false);
@@ -565,7 +669,12 @@ export default function Home() {
     <div className="app">
       <header>
         <div className="brand">✦ <span>AI</span> VIDEO FACTORY</div>
-        <div className="header-right">Long-form YouTube Studio <span className="health-chip">AI {health?.openai ? "READY" : "CONFIGURE"}</span><span className="health-chip">RENDER {health?.render ? "READY" : "OPTIONAL"}</span></div>
+        <div className="header-right">
+          Long-form YouTube Studio
+          <span className="health-chip">AI {health?.status === "ready" ? "READY" : health?.status === "degraded" ? "CHECK" : "CONFIGURE"}</span>
+          <span className="health-chip">IMG {health?.image?.available ? "READY" : "CHECK"}</span>
+          <span className="health-chip">TTS {health?.tts?.available ? "READY" : "CHECK"}</span>
+        </div>
       </header>
 
       <main className="wrap">
@@ -657,6 +766,11 @@ export default function Home() {
                         <div><span className="badge">{selectedMode(s)}</span><span className="badge">{s.duration}s</span>{visualMeta[s.id] && <span className="badge">{visualMeta[s.id]}</span>}</div>
                         <p>{s.narration}</p>
                         <small className="muted">🎥 {s.camera} · {s.transition}</small>
+                        {assetErrors[s.id] && (
+                          <small className="error-text">
+                            ⚠ {assetErrors[s.id].code}: {assetErrors[s.id].message}
+                          </small>
+                        )}
                         {voices[s.id] && <audio controls src={voices[s.id]} />}
                       </div>
                       <div className="scene-actions">

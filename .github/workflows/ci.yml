@@ -55,3 +55,72 @@ jobs:
           echo "home http=$code"
           test "$code" = "200"
           test -s /tmp/home.html
+
+  production-media-smoke:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[media-smoke]')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify production image generation
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          set -e
+          body='{"prompt":"A simple red apple on a clean white table, realistic editorial photograph.","mode":"ai","aspectRatio":"1:1","style":"Documentário"}'
+          curl -L -sS -X POST "$PROD_URL/api/visuals"             -H "Content-Type: application/json"             --data "$body"             -o /tmp/image.json
+          cat /tmp/image.json
+          node - <<'NODE'
+          const fs = require("fs");
+          const d = JSON.parse(fs.readFileSync("/tmp/image.json","utf8"));
+          if (!d.imageUrl || !d.imageUrl.startsWith("data:image/jpeg;base64,") || d.imageUrl.length < 1000) {
+            console.error("Image generation did not return a usable JPEG data URL");
+            process.exit(1);
+          }
+          console.log("IMAGE_SMOKE_PASS");
+          NODE
+
+      - name: Verify production TTS generation
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          set -e
+          body='{"text":"Este é um teste de voz em português de Portugal.","voice":"marin","speed":1}'
+          curl -L -sS -X POST "$PROD_URL/api/tts"             -H "Content-Type: application/json"             -D /tmp/audio.headers             --data "$body"             -o /tmp/test.mp3
+          cat /tmp/audio.headers
+          test -s /tmp/test.mp3
+          grep -qi "content-type: audio/mpeg" /tmp/audio.headers
+          node - <<'NODE'
+          const fs = require("fs");
+          const b = fs.readFileSync("/tmp/test.mp3");
+          const id3 = b.length >= 3 && b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33;
+          const frame = b.length >= 2 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0;
+          if (!id3 && !frame) {
+            console.error("TTS response is not a recognizable MP3");
+            process.exit(1);
+          }
+          console.log("AUDIO_SMOKE_PASS bytes=" + b.length);
+          NODE
+
+      - name: Verify production stock path and proxy
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          set -e
+          body='{"prompt":"red apple on table","mode":"stock","aspectRatio":"1:1","style":"Documentário"}'
+          curl -L -sS -X POST "$PROD_URL/api/visuals"             -H "Content-Type: application/json"             --data "$body"             -o /tmp/stock.json
+          cat /tmp/stock.json
+          node - <<'NODE'
+          const fs = require("fs");
+          const d = JSON.parse(fs.readFileSync("/tmp/stock.json","utf8"));
+          if (!d.selected?.imageUrl || !/^https:\/\/(upload\.wikimedia\.org|commons\.wikimedia\.org)\//.test(d.selected.imageUrl)) {
+            console.error("Stock path did not return an allowed Wikimedia image");
+            process.exit(1);
+          }
+          fs.writeFileSync("/tmp/stock-url.txt", d.selected.imageUrl);
+          console.log("STOCK_SEARCH_PASS");
+          NODE
+          url=$(cat /tmp/stock-url.txt)
+          curl -L -sS "$PROD_URL/api/asset-proxy?url=$(python -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1], safe=""))' "$url")"             -D /tmp/proxy.headers             -o /tmp/stock.img
+          test -s /tmp/stock.img
+          grep -qi "content-type: image/" /tmp/proxy.headers
+          echo "STOCK_PROXY_PASS bytes=$(wc -c < /tmp/stock.img)"

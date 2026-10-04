@@ -96,9 +96,12 @@ jobs:
           body='{"text":"Este é um teste de voz em português de Portugal.","voice":"marin","speed":1}'
           curl -L -sS -X POST "$PROD_URL/api/tts"             -H "Content-Type: application/json"             -D /tmp/audio.headers             --data "$body"             -o /tmp/test.mp3
           cat /tmp/audio.headers
+          echo "TTS_BODY:"
+          head -c 4000 /tmp/test.mp3 || true
+          echo
           test -s /tmp/test.mp3
           grep -qi "content-type: audio/mpeg" /tmp/audio.headers
-          node - <<'NODE'
+          node - <<'NODE
           const fs = require("fs");
           const b = fs.readFileSync("/tmp/test.mp3");
           const id3 = b.length >= 3 && b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33;

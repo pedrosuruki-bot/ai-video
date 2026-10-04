@@ -1,1 +1,199 @@
-"use client";import{useMemo,useState}from"react";import type{Analysis,Settings}from"@/lib/types";const demo="Há uma razão pela qual algumas coisas que vemos todos os dias parecem completamente normais. Mas quando paramos para olhar com atenção, percebemos que existe muito mais por trás delas. Hoje vamos descobrir como este fenómeno funciona, porque acontece e o que muda quando as condições certas aparecem.";const defaults:Settings={language:"Português (Portugal)",voice:"marin",visualMode:"hybrid",aspectRatio:"16:9",resolution:"1080p",style:"Documentário",subtitles:true};const fmt=(s:number)=>Math.floor(s/60)+":"+String(Math.round(s%60)).padStart(2,"0");export default function Home(){const[script,setScript]=useState("");const[settings,setSettings]=useState(defaults);const[data,setData]=useState<Analysis|null>(null);const[busy,setBusy]=useState(false);const[msg,setMsg]=useState("Cole o roteiro para começar.");const words=useMemo(()=>script.trim().split(/\\s+/).filter(Boolean).length,[script]);async function generate(){setBusy(true);setMsg("A analisar o roteiro…");try{const r=await fetch("/api/analyze",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({script:script||demo,settings})});const d=await r.json();if(!r.ok)throw Error(d.error);setData(d);setMsg("Storyboard criado. A próxima etapa é gerar os visuais e a voz.");}catch(e){setMsg(e instanceof Error?e.message:"Erro");}finally{setBusy(false)}}return <div className="app"><header><div className="brand">✦ <span>AI</span> VIDEO FACTORY</div><div style={{color:"#8f95a8",fontSize:12}}>Long-form YouTube Studio</div></header><main className="wrap"><div className="hero"><div><div className="eyebrow">AI video factory</div><h1>Do roteiro ao vídeo.</h1><p>Cola um roteiro de 15–35 minutos e transforma-o num storyboard pronto para produção.</p></div><button onClick={()=>setScript(demo)}>Carregar demo</button></div><div className="grid"><section className="panel"><div className="ph"><b>Roteiro</b><span className="badge">{words} palavras</span></div><div className="pb"><textarea className="script" value={script} onChange={e=>setScript(e.target.value)} placeholder="Cole aqui o roteiro completo…"/><div className="stats"><span>Duração estimada: {fmt(words/150*60)}</span><span>16:9 • 1080p</span></div></div></section><aside className="panel"><div className="ph"><b>Produção</b><span className="badge">V1</span></div><div className="pb settings"><div className="field"><label>Idioma</label><select value={settings.language} onChange={e=>setSettings({...settings,language:e.target.value})}><option>Português (Portugal)</option><option>English</option><option>Español</option></select></div><div className="field"><label>Voz</label><select value={settings.voice} onChange={e=>setSettings({...settings,voice:e.target.value})}><option value="marin">Masculina • marin</option><option value="onyx">Masculina • onyx</option></select></div><div className="field"><label>Visuais</label><div className="seg">{["hybrid","ai","stock"].map(v=><button key={v} className={settings.visualMode===v?"active":""} onClick={()=>setSettings({...settings,visualMode:v})}>{v==="hybrid"?"Híbrido":v==="ai"?"Só IA":"Só stock"}</button>)}</div></div><div className="field"><label>Formato</label><select value={settings.aspectRatio} onChange={e=>setSettings({...settings,aspectRatio:e.target.value})}><option>16:9</option><option>9:16</option><option>1:1</option></select></div><div className="field"><label>Estilo</label><select value={settings.style} onChange={e=>setSettings({...settings,style:e.target.value})}><option>Documentário</option><option>Educacional</option><option>News</option><option>Mistério</option><option>Ciência</option></select></div><button className="primary" onClick={generate} disabled={busy}>{busy?"A ANALISAR…":"✦ GERAR STORYBOARD"}</button><div className={msg.startsWith("Erro")?"error":"status"}>{msg}</div></div></aside></div>{data&&<section className="panel results"><div className="ph"><b>{data.title}</b><span className="ok">READY</span></div><div className="pb"><div className="metrics"><div className="metric"><b>{data.scenes.length}</b><small>cenas</small></div><div className="metric"><b>{fmt(data.estimatedDuration)}</b><small>duração</small></div><div className="metric"><b>{data.wordCount}</b><small>palavras</small></div></div></div><div className="pb"><div className="scenes">{data.scenes.slice(0,30).map(s=><article className="scene" key={s.id}><div className="thumb">SCENE {String(s.index).padStart(2,"0")}</div><div><span className="badge">{s.visualType}</span><span className="badge">{s.duration}s</span><p>{s.narration}</p><small style={{color:"#858b9e"}}>🎥 {s.camera} · {s.transition}</small></div><button onClick={()=>alert("Regeneração visual será ligada ao provider na próxima etapa.")}>↻</button></article>)}</div></div></section>}</main></div>}
+"use client";
+
+import { useMemo, useState } from "react";
+import type { Analysis, Settings } from "@/lib/types";
+
+const demo =
+  "Há uma razão pela qual algumas coisas que vemos todos os dias parecem completamente normais. Mas quando paramos para olhar com atenção, percebemos que existe muito mais por trás delas. Hoje vamos descobrir como este fenómeno funciona, porque acontece e o que muda quando as condições certas aparecem.";
+
+const defaults: Settings = {
+  language: "Português (Portugal)",
+  voice: "marin",
+  visualMode: "hybrid",
+  aspectRatio: "16:9",
+  resolution: "1080p",
+  style: "Documentário",
+  subtitles: true,
+};
+
+const fmt = (s: number) =>
+  Math.floor(s / 60) + ":" + String(Math.round(s % 60)).padStart(2, "0");
+
+export default function Home() {
+  const [script, setScript] = useState("");
+  const [settings, setSettings] = useState(defaults);
+  const [data, setData] = useState<Analysis | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("Cole o roteiro para começar.");
+
+  const words = useMemo(
+    () => script.trim().split(/\s+/).filter(Boolean).length,
+    [script]
+  );
+
+  async function generate() {
+    setBusy(true);
+    setMsg("A analisar o roteiro…");
+
+    try {
+      const r = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ script: script || demo, settings }),
+      });
+
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || "Erro ao analisar o roteiro.");
+
+      setData(d);
+      setMsg(d.mode === "fallback"
+        ? "Storyboard criado em modo local. A API de IA não respondeu."
+        : "Storyboard criado com IA.");
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Erro inesperado.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="app">
+      <header>
+        <div className="brand">✦ <span>AI</span> VIDEO FACTORY</div>
+        <div style={{ color: "#8f95a8", fontSize: 12 }}>Long-form YouTube Studio</div>
+      </header>
+
+      <main className="wrap">
+        <div className="hero">
+          <div>
+            <div className="eyebrow">AI video factory</div>
+            <h1>Do roteiro ao vídeo.</h1>
+            <p>Cola um roteiro de 15–35 minutos e transforma-o num storyboard pronto para produção.</p>
+          </div>
+          <button onClick={() => setScript(demo)}>Carregar demo</button>
+        </div>
+
+        <div className="grid">
+          <section className="panel">
+            <div className="ph">
+              <b>Roteiro</b>
+              <span className="badge">{words} palavras</span>
+            </div>
+            <div className="pb">
+              <textarea
+                className="script"
+                value={script}
+                onChange={(e) => setScript(e.target.value)}
+                placeholder="Cole aqui o roteiro completo…"
+              />
+              <div className="stats">
+                <span>Duração estimada: {fmt((words / 150) * 60)}</span>
+                <span>16:9 • 1080p</span>
+              </div>
+            </div>
+          </section>
+
+          <aside className="panel">
+            <div className="ph">
+              <b>Produção</b>
+              <span className="badge">V1</span>
+            </div>
+            <div className="pb settings">
+              <div className="field">
+                <label>Idioma</label>
+                <select value={settings.language} onChange={(e) => setSettings({ ...settings, language: e.target.value })}>
+                  <option>Português (Portugal)</option>
+                  <option>English</option>
+                  <option>Español</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label>Voz</label>
+                <select value={settings.voice} onChange={(e) => setSettings({ ...settings, voice: e.target.value })}>
+                  <option value="marin">Masculina • marin</option>
+                  <option value="onyx">Masculina • onyx</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label>Visuais</label>
+                <div className="seg">
+                  {["hybrid", "ai", "stock"].map((v) => (
+                    <button
+                      key={v}
+                      className={settings.visualMode === v ? "active" : ""}
+                      onClick={() => setSettings({ ...settings, visualMode: v })}
+                    >
+                      {v === "hybrid" ? "Híbrido" : v === "ai" ? "Só IA" : "Só stock"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="field">
+                <label>Formato</label>
+                <select value={settings.aspectRatio} onChange={(e) => setSettings({ ...settings, aspectRatio: e.target.value })}>
+                  <option>16:9</option>
+                  <option>9:16</option>
+                  <option>1:1</option>
+                </select>
+              </div>
+
+              <div className="field">
+                <label>Estilo</label>
+                <select value={settings.style} onChange={(e) => setSettings({ ...settings, style: e.target.value })}>
+                  <option>Documentário</option>
+                  <option>Educacional</option>
+                  <option>News</option>
+                  <option>Mistério</option>
+                  <option>Ciência</option>
+                </select>
+              </div>
+
+              <button className="primary" onClick={generate} disabled={busy}>
+                {busy ? "A ANALISAR…" : "✦ GERAR STORYBOARD"}
+              </button>
+
+              <div className={msg.includes("Erro") ? "error" : "status"}>{msg}</div>
+            </div>
+          </aside>
+        </div>
+
+        {data && (
+          <section className="panel results">
+            <div className="ph">
+              <b>{data.title}</b>
+              <span className="ok">READY</span>
+            </div>
+
+            <div className="pb">
+              <div className="metrics">
+                <div className="metric"><b>{data.scenes.length}</b><small>cenas</small></div>
+                <div className="metric"><b>{fmt(data.estimatedDuration)}</b><small>duração</small></div>
+                <div className="metric"><b>{data.wordCount}</b><small>palavras</small></div>
+              </div>
+            </div>
+
+            <div className="pb">
+              <div className="scenes">
+                {data.scenes.slice(0, 100).map((s) => (
+                  <article className="scene" key={s.id}>
+                    <div className="thumb">SCENE {String(s.index).padStart(2, "0")}</div>
+                    <div>
+                      <span className="badge">{s.visualType}</span>
+                      <span className="badge">{s.duration}s</span>
+                      <p>{s.narration}</p>
+                      <small style={{ color: "#858b9e" }}>🎥 {s.camera} · {s.transition}</small>
+                    </div>
+                    <button onClick={() => alert("Regeneração visual será ligada ao provider na próxima etapa.")}>↻</button>
+                  </article>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
+    </div>
+  );
+}

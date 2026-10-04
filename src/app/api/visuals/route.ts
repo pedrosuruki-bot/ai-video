@@ -247,4 +247,3 @@ export async function POST(req: Request) {
       fallbackQuery: fallbackQuery,
     }, { status: 502 });
   }
-}

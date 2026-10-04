@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import JSZip from "jszip";
 import type { Analysis, Scene, Settings } from "@/lib/types";
 
 const demo =
@@ -36,6 +37,7 @@ export default function Home() {
   const [settings, setSettings] = useState(defaults);
   const [data, setData] = useState<Analysis | null>(null);
   const [busy, setBusy] = useState(false);
+  const [packageBusy, setPackageBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [visuals, setVisuals] = useState<Record<string, string>>({});
   const [visualMeta, setVisualMeta] = useState<Record<string, string>>({});
@@ -84,7 +86,7 @@ export default function Home() {
     }
   }
 
-  async function generateVisual(scene: Scene) {
+  async function generateVisual(scene: Scene): Promise<string | null> {
     setProgress("A gerar visual da cena " + scene.index + "…");
     try {
       const mode = selectedMode(scene);
@@ -113,8 +115,10 @@ export default function Home() {
         [scene.id]: d.source + (selected?.license ? " • " + selected.license : ""),
       }));
       setProgress("Visual da cena " + scene.index + " pronto.");
+      return imageUrl;
     } catch (e) {
       setProgress(e instanceof Error ? e.message : "Erro visual.");
+      return null;
     }
   }
 
@@ -130,7 +134,7 @@ export default function Home() {
     setProgress("Pré-visualização visual concluída.");
   }
 
-  async function generateVoice(scene: Scene) {
+  async function generateVoice(scene: Scene): Promise<string | null> {
     setProgress("A gerar voz da cena " + scene.index + "…");
     try {
       const r = await fetch("/api/tts", {
@@ -152,8 +156,10 @@ export default function Home() {
       if (old) URL.revokeObjectURL(old);
       setVoices((v) => ({ ...v, [scene.id]: url }));
       setProgress("Voz da cena " + scene.index + " pronta. Voz gerada por IA.");
+      return url;
     } catch (e) {
       setProgress(e instanceof Error ? e.message : "Erro de voz.");
+      return null;
     }
   }
 
@@ -186,6 +192,181 @@ export default function Home() {
     };
     downloadText("ai-video-project.json", JSON.stringify(payload, null, 2));
     setProgress("Projeto exportado em JSON.");
+  }
+
+  async function fetchExportAsset(url: string) {
+    if (url.startsWith("data:")) {
+      const r = await fetch(url);
+      return r.blob();
+    }
+    const r = await fetch("/api/asset-proxy?url=" + encodeURIComponent(url));
+    if (!r.ok) throw new Error("Não foi possível descarregar uma imagem.");
+    return r.blob();
+  }
+
+  async function fetchCaptionText(format: "srt" | "vtt") {
+    const r = await fetch("/api/captions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ scenes: data?.scenes || [], format }),
+    });
+    if (!r.ok) throw new Error("Não foi possível gerar as legendas.");
+    return r.text();
+  }
+
+  function slugify(value: string) {
+    return value
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[^a-zA-Z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 60)
+      .toUpperCase() || "PROJETO";
+  }
+
+  async function exportCapCutPackage() {
+    if (!data || packageBusy) return;
+
+    setPackageBusy(true);
+    setBusy(true);
+
+    try {
+      const zip = new JSZip();
+      const imageMap: Record<string, string> = { ...visuals };
+      const voiceMap: Record<string, string> = { ...voices };
+
+      for (let i = 0; i < data.scenes.length; i++) {
+        const scene = data.scenes[i];
+        setProgress("A preparar assets " + (i + 1) + "/" + data.scenes.length + "…");
+
+        if (!imageMap[scene.id]) {
+          const url = await generateVisual(scene);
+          if (url) imageMap[scene.id] = url;
+        }
+
+        if (!voiceMap[scene.id]) {
+          const url = await generateVoice(scene);
+          if (url) voiceMap[scene.id] = url;
+        }
+
+        const imageUrl = imageMap[scene.id];
+        if (imageUrl) {
+          try {
+            const imageBlob = await fetchExportAsset(imageUrl);
+            zip.file("media/images/" + String(scene.index).padStart(3, "0") + ".jpg", imageBlob);
+          } catch {
+            zip.file(
+              "media/images/" + String(scene.index).padStart(3, "0") + "-SOURCE.txt",
+              imageUrl
+            );
+          }
+        }
+
+        const voiceUrl = voiceMap[scene.id];
+        if (voiceUrl) {
+          const audioBlob = await fetch(voiceUrl).then((x) => x.blob());
+          zip.file("media/audio/" + String(scene.index).padStart(3, "0") + ".mp3", audioBlob);
+        }
+      }
+
+      const srt = await fetchCaptionText("srt");
+      const vtt = await fetchCaptionText("vtt");
+
+      let cursor = 0;
+      const timeline = data.scenes.map((scene) => {
+        const start = cursor;
+        const end = cursor + Math.max(1, Number(scene.duration) || 4);
+        cursor = end;
+        return {
+          scene: scene.index,
+          start,
+          end,
+          duration: end - start,
+          image: "media/images/" + String(scene.index).padStart(3, "0") + ".jpg",
+          audio: "media/audio/" + String(scene.index).padStart(3, "0") + ".mp3",
+          narration: scene.narration,
+          camera: scene.camera,
+          transition: scene.transition,
+          visualSource: visualMeta[scene.id] || selectedMode(scene),
+        };
+      });
+
+      const csvEscape = (value: string | number) => {
+        const text = String(value).replace(/"/g, '""');
+        return '"' + text + '"';
+      };
+
+      const csv = [
+        "scene,start_seconds,end_seconds,duration_seconds,image,audio,narration",
+        ...timeline.map((item) =>
+          [
+            item.scene,
+            item.start.toFixed(2),
+            item.end.toFixed(2),
+            item.duration.toFixed(2),
+            item.image,
+            item.audio,
+            item.narration,
+          ].map(csvEscape).join(",")
+        ),
+      ].join("\n");
+
+      const guide = [
+        "AI VIDEO FACTORY — PACOTE CAPCUT",
+        "",
+        "Este pacote foi preparado para montagem no CapCut.",
+        "Formato: " + settings.aspectRatio,
+        "Resolução alvo: " + settings.resolution,
+        "FPS: 30",
+        "Idioma: " + settings.language,
+        "",
+        "CONTEÚDO",
+        "- media/images/: uma imagem por cena, em ordem numérica.",
+        "- media/audio/: uma narração MP3 por cena, em ordem numérica.",
+        "- captions.srt: legendas sincronizadas.",
+        "- captions.vtt: versão WebVTT.",
+        "- timeline.csv: início, fim, duração e ficheiros de cada cena.",
+        "- storyboard.json: prompts, narrativa e definições.",
+        "",
+        "MONTAGEM",
+        "1. Importe as imagens pela ordem numérica.",
+        "2. Use timeline.csv para aplicar a duração indicada a cada imagem.",
+        "3. Importe os MP3 de áudio correspondentes e alinhe-os pelos mesmos números.",
+        "4. No CapCut Web/Desktop, importe captions.srt se quiser legendas editáveis.",
+        "5. No iPhone, o CapCut Mobile não importa SRT diretamente; pode sincronizar um projeto criado no Web/Desktop.",
+        "",
+        "NOTA: as imagens podem ser IA ou stock. A fonte/licença aparece no storyboard.json.",
+      ].join("\n");
+
+      zip.file("captions.srt", srt);
+      zip.file("captions.vtt", vtt);
+      zip.file("timeline.csv", csv);
+      zip.file("storyboard.json", JSON.stringify({
+        app: "AI Video Factory",
+        version: "0.3-capcut",
+        settings,
+        analysis: data,
+        visualSources: visualMeta,
+        exportedAt: new Date().toISOString(),
+      }, null, 2));
+      zip.file("full-script.txt", data.scenes.map((s) => s.narration).join("\n\n"));
+      zip.file("GUIA-CAPCUT.txt", guide);
+
+      setProgress("A compactar o projeto…");
+      const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "VYNKO_" + slugify(data.title) + "_CAPCUT.zip";
+      a.click();
+      URL.revokeObjectURL(url);
+      setProgress("Pacote CapCut pronto: imagens, voz, SRT, VTT e timeline.");
+    } catch (e) {
+      setProgress(e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.");
+    } finally {
+      setPackageBusy(false);
+      setBusy(false);
+    }
   }
 
   async function startRender() {
@@ -324,6 +505,7 @@ export default function Home() {
                 <button onClick={() => downloadCaptions("srt")}>↓ SRT</button>
                 <button onClick={() => downloadCaptions("vtt")}>↓ VTT</button>
                 <button onClick={exportProject}>↓ Projeto JSON</button>
+                <button className="secondary" onClick={exportCapCutPackage} disabled={busy || packageBusy}>📦 GERAR PROJETO CAPCUT</button>
                 <button className="primary small" onClick={startRender}>🎬 RENDER MP4</button>
               </div>
               {renderStatus && <div className="render-box"><b>{renderStatus}</b>{renderId && <small>Job: {renderId}</small>}</div>}

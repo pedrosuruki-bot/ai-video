@@ -119,3 +119,39 @@ test("real MP3 signatures are accepted and empty audio is rejected", () => {
   assert.equal(isMp3Bytes(new Uint8Array(), "audio/mpeg"), false);
   assert.equal(isMp3Bytes(new Uint8Array([0x49,0x44,0x33,0x04]), "text/html"), false);
 });
+
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readValidAudioResponse } from "../src/lib/media-http";
+
+const mp3Bytes = new Uint8Array([0x49,0x44,0x33,0x04,0x00,0x00]);
+
+test("binary TTS success response is read as audio, not JSON", async () => {
+  const response = new Response(mp3Bytes, {
+    status: 200,
+    headers: { "Content-Type": "audio/mpeg" },
+  });
+
+  const blob = await readValidAudioResponse(response);
+  assert.equal(blob.type, "audio/mpeg");
+  assert.equal(blob.size, mp3Bytes.length);
+});
+
+test("regression: parsing successful audio as JSON consumes the body", async () => {
+  const response = new Response(mp3Bytes, {
+    status: 200,
+    headers: { "Content-Type": "audio/mpeg" },
+  });
+
+  await response.json().catch(() => undefined);
+  await assert.rejects(() => response.blob());
+});
+
+test("invalid TTS MIME is rejected before accepting the body", async () => {
+  const response = new Response(mp3Bytes, {
+    status: 200,
+    headers: { "Content-Type": "text/html" },
+  });
+
+  await assert.rejects(() => readValidAudioResponse(response), /AUDIO_RESPONSE_INVALID/);
+});

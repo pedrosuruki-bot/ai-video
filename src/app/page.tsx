@@ -42,7 +42,12 @@ export default function Home() {
   const [voices, setVoices] = useState<Record<string, string>>({});
   const [renderId, setRenderId] = useState<string | null>(null);
   const [renderStatus, setRenderStatus] = useState("");
-  const [showAll, setShowAll] = useState(false);\n  const [health, setHealth] = useState<{openai:boolean;image:boolean;stock:boolean;render:boolean} | null>(null);\n\n  useEffect(() => {\n    fetch("/api/health").then((r) => r.json()).then(setHealth).catch(() => setHealth(null));\n  }, []);
+  const [showAll, setShowAll] = useState(false);
+  const [health, setHealth] = useState<{openai:boolean;image:boolean;stock:boolean;render:boolean} | null>(null);
+
+  useEffect(() => {
+    fetch("/api/health").then((r) => r.json()).then(setHealth).catch(() => setHealth(null));
+  }, []);
 
   const words = useMemo(
     () => script.trim().split(/\s+/).filter(Boolean).length,

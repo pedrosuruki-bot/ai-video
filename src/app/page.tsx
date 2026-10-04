@@ -368,12 +368,12 @@ export default function Home() {
   function validateCaptionText(text: string, format: "srt" | "vtt", expected: number) {
     if (!text.trim()) return "Legenda " + format.toUpperCase() + " vazia.";
     const cueCount = format === "vtt"
-      ? (text.match(/\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\s+-->\\s+/g) || []).length
-      : (text.match(/\\d{2}:\\d{2}:\\d{2},\\d{3}\\s+-->\\s+/g) || []).length;
+      ? (text.match(/\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+/g) || []).length
+      : (text.match(/\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+/g) || []).length;
     if (cueCount !== expected) {
       return "Legenda " + format.toUpperCase() + " incompleta: " + cueCount + "/" + expected + " cues.";
     }
-    if (/-->\\s*-->/.test(text)) return "Legenda " + format.toUpperCase() + " contém timestamps inválidos.";
+    if (/-->\s*-->/.test(text)) return "Legenda " + format.toUpperCase() + " contém timestamps inválidos.";
     return "";
   }
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import JSZip from "jszip";
 import type { Analysis, AssetError, Scene, Settings } from "@/lib/types";
+import { isImageBytes, isMp3Bytes, validateCaptionText, validateStoryboard, validateTimeline } from "@/lib/export-validation";
 
 const demo =
   "Há uma razão pela qual algumas coisas que vemos todos os dias parecem completamente normais. " +
@@ -47,6 +48,10 @@ export default function Home() {
   const [showAll, setShowAll] = useState(false);
   const [health, setHealth] = useState<any>(null);
   const [assetErrors, setAssetErrors] = useState<Record<string, AssetError>>({});
+  const [exportValidation, setExportValidation] = useState({
+    status: "pending" as "pending" | "blocked" | "complete",
+    errors: [] as string[],
+  });
 
   async function refreshDiagnostics() {
     try {
@@ -115,44 +120,58 @@ export default function Home() {
     errorSink?: (error: AssetError) => void
   ): Promise<string | null> {
     setProgress("A gerar visual da cena " + scene.index + "…");
+    let reported = false;
+
+    const report = (error: AssetError) => {
+      reported = true;
+      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+      errorSink?.(error);
+    };
+
     try {
       const mode = selectedMode(scene);
       const prompt = mode === "stock"
         ? (scene.searchQueries?.[0] || scene.visualPrompt || scene.narration)
         : scene.visualPrompt || scene.narration;
 
-      const r = await fetch("/api/visuals", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          prompt,
-          mode,
-          aspectRatio: settings.aspectRatio,
-          style: settings.style,
-        }),
-      });
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 70000);
+      let r: Response;
+      try {
+        r = await fetch("/api/visuals", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            prompt,
+            stockQuery: scene.searchQueries?.[0] || "",
+            mode,
+            aspectRatio: settings.aspectRatio,
+            style: settings.style,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
 
       const d = await r.json().catch(() => ({}));
       if (!r.ok) {
-        const error = parseApiError(d, "Não foi possível gerar o visual.", "image");
-        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-        errorSink?.(error);
-        throw new Error(error.code + ": " + error.message);
+        report(parseApiError(d, "Não foi possível gerar o visual.", "image"));
+        setProgress(String(d?.code || "IMAGE_PROVIDER_ERROR") + ": " + String(d?.error || "Erro visual."));
+        return null;
       }
 
       const selected = d.selected;
       const imageUrl = d.imageUrl || selected?.imageUrl;
       if (!imageUrl) {
-        const error: AssetError = {
+        report({
           code: "IMAGE_RESPONSE_EMPTY",
           message: "A API respondeu sem uma imagem utilizável.",
           stage: "image",
-          provider: d.source,
+          provider: d.source || "OpenAI",
           retryable: false,
-        };
-        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-        errorSink?.(error);
-        throw new Error(error.code + ": " + error.message);
+        });
+        return null;
       }
 
       setVisuals((v) => ({ ...v, [scene.id]: imageUrl }));
@@ -162,15 +181,15 @@ export default function Home() {
       }));
 
       if (d.warning && d.originalProviderError) {
-        const fallbackError: AssetError = {
+        report({
           code: String(d.originalProviderError.code || "IMAGE_FALLBACK_USED"),
           message: String(d.warning),
           stage: "image",
           provider: "Wikimedia Commons",
           retryable: false,
-          detail: String(d.originalProviderError.message || ""),
-        };
-        setAssetErrors((v) => ({ ...v, [scene.id]: fallbackError }));
+          detail: String(d.originalProviderError.message || "") +
+            " | fallback=" + String(d.fallbackQuery || ""),
+        });
       } else {
         setAssetErrors((v) => {
           const next = { ...v };
@@ -182,19 +201,15 @@ export default function Home() {
       setProgress("Visual da cena " + scene.index + " pronto.");
       return imageUrl;
     } catch (e) {
-      const error: AssetError = e instanceof Error && e.message.includes(": ")
-        ? {
-            code: e.message.split(": ")[0] || "IMAGE_PROVIDER_ERROR",
-            message: e.message.split(": ").slice(1).join(": ") || e.message,
-            stage: "image",
-          }
-        : {
-            code: "IMAGE_PROVIDER_ERROR",
-            message: e instanceof Error ? e.message : "Erro visual.",
-            stage: "image",
-          };
-      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-      errorSink?.(error);
+      const message = e instanceof Error ? e.message : "Erro de rede ao gerar visual.";
+      const isTimeout = message.toLowerCase().includes("abort");
+      const error: AssetError = {
+        code: isTimeout ? "BROWSER_NETWORK_TIMEOUT" : "IMAGE_PROVIDER_ERROR",
+        message: isTimeout ? "O pedido visual excedeu o tempo limite do browser." : message,
+        stage: "image",
+        retryable: true,
+      };
+      if (!reported) report(error);
       setProgress(error.code + ": " + error.message);
       return null;
     }
@@ -217,40 +232,70 @@ export default function Home() {
     errorSink?: (error: AssetError) => void
   ): Promise<string | null> {
     setProgress("A gerar voz da cena " + scene.index + "…");
-    try {
-      const r = await fetch("/api/tts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: scene.narration,
-          voice: settings.voice,
-          speed: 1,
-        }),
-      });
+    let reported = false;
 
-      const d = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        const error = parseApiError(d, "Erro de voz.", "audio");
-        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-        errorSink?.(error);
-        throw new Error(error.code + ": " + error.message);
+    const report = (error: AssetError) => {
+      reported = true;
+      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
+      errorSink?.(error);
+    };
+
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 70000);
+      let r: Response;
+      try {
+        r = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            text: scene.narration,
+            voice: settings.voice,
+            speed: 1,
+          }),
+          signal: controller.signal,
+        });
+      } finally {
+        clearTimeout(timer);
       }
 
-      const blob = await r.blob();
-      if (!blob.size || !String(blob.type || "").startsWith("audio/")) {
-        const error: AssetError = {
+      // IMPORTANT: only parse JSON for error responses. A successful TTS
+      // response is binary audio, so parsing it as JSON would consume the
+      // response body and make r.blob() fail.
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const error = parseApiError(d, "Erro de voz.", "audio");
+        report(error);
+        setProgress(error.code + ": " + error.message);
+        return null;
+      }
+
+      const contentType = String(r.headers.get("content-type") || "").split(";")[0].toLowerCase();
+      if (contentType !== "audio/mpeg" && contentType !== "audio/mp3") {
+        report({
           code: "AUDIO_RESPONSE_INVALID",
-          message: "A API devolveu um áudio vazio ou com formato inválido.",
+          message: "A API respondeu com Content-Type inesperado: " + (contentType || "ausente") + ".",
           stage: "audio",
           provider: "OpenAI",
           retryable: false,
-        };
-        setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-        errorSink?.(error);
-        throw new Error(error.code + ": " + error.message);
+        });
+        return null;
       }
 
-      const url = URL.createObjectURL(blob);
+      const blob = await r.blob();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (!blob.size || !isMp3Bytes(bytes, contentType)) {
+        report({
+          code: "AUDIO_RESPONSE_INVALID",
+          message: "A API devolveu um áudio vazio ou que não é um MP3 utilizável.",
+          stage: "audio",
+          provider: "OpenAI",
+          retryable: false,
+        });
+        return null;
+      }
+
+      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
       const old = voices[scene.id];
       if (old) URL.revokeObjectURL(old);
       setVoices((v) => ({ ...v, [scene.id]: url }));
@@ -262,19 +307,15 @@ export default function Home() {
       setProgress("Voz da cena " + scene.index + " pronta. Voz gerada por IA.");
       return url;
     } catch (e) {
-      const error: AssetError = e instanceof Error && e.message.includes(": ")
-        ? {
-            code: e.message.split(": ")[0] || "TTS_PROVIDER_ERROR",
-            message: e.message.split(": ").slice(1).join(": ") || e.message,
-            stage: "audio",
-          }
-        : {
-            code: "TTS_PROVIDER_ERROR",
-            message: e instanceof Error ? e.message : "Erro de voz.",
-            stage: "audio",
-          };
-      setAssetErrors((v) => ({ ...v, [scene.id]: error }));
-      errorSink?.(error);
+      const message = e instanceof Error ? e.message : "Erro de rede ao gerar voz.";
+      const isTimeout = message.toLowerCase().includes("abort");
+      const error: AssetError = {
+        code: isTimeout ? "BROWSER_NETWORK_TIMEOUT" : "TTS_PROVIDER_ERROR",
+        message: isTimeout ? "O pedido TTS excedeu o tempo limite do browser." : message,
+        stage: "audio",
+        retryable: true,
+      };
+      if (!reported) report(error);
       setProgress(error.code + ": " + error.message);
       return null;
     }
@@ -312,21 +353,80 @@ export default function Home() {
   }
 
   async function fetchExportAsset(url: string) {
-    const r = url.startsWith("data:")
-      ? await fetch(url)
-      : await fetch("/api/asset-proxy?url=" + encodeURIComponent(url));
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      const r = url.startsWith("data:")
+        ? await fetch(url, { signal: controller.signal })
+        : await fetch("/api/asset-proxy?url=" + encodeURIComponent(url), { signal: controller.signal });
 
-    if (!r.ok) {
-      const d = await r.json().catch(() => ({}));
-      throw new Error(String(d?.code || "IMAGE_DOWNLOAD_ERROR") + ": " + String(d?.error || "Não foi possível descarregar uma imagem."));
-    }
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        throw new Error(
+          String(d?.code || "IMAGE_DOWNLOAD_ERROR") + ": " +
+          String(d?.error || "Não foi possível descarregar uma imagem.")
+        );
+      }
 
-    const blob = await r.blob();
-    const type = String(blob.type || "");
-    if (!blob.size || !type.startsWith("image/")) {
-      throw new Error("IMAGE_DOWNLOAD_ERROR: o ficheiro descarregado não é uma imagem válida.");
+      const contentType = String(r.headers.get("content-type") || "").split(";")[0].toLowerCase();
+      const blob = await r.blob();
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+
+      if (!blob.size || !isImageBytes(bytes, contentType)) {
+        throw new Error(
+          "IMAGE_DOWNLOAD_ERROR: o ficheiro descarregado não é uma imagem válida (" +
+          (contentType || "Content-Type ausente") + ")."
+        );
+      }
+
+      return blob;
+    } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") {
+        throw new Error("IMAGE_DOWNLOAD_ERROR: timeout no download da imagem.");
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
     }
-    return blob;
+  }
+
+  async function normalizeImageToJpeg(blob: Blob) {
+    const type = String(blob.type || "").split(";")[0].toLowerCase();
+    if (type === "image/jpeg") return blob;
+
+    const objectUrl = URL.createObjectURL(blob);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("IMAGE_CONVERSION_ERROR: o browser não conseguiu descodificar a imagem."));
+        image.src = objectUrl;
+      });
+
+      if (!img.naturalWidth || !img.naturalHeight) {
+        throw new Error("IMAGE_CONVERSION_ERROR: imagem sem dimensões utilizáveis.");
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("IMAGE_CONVERSION_ERROR: canvas indisponível no browser.");
+
+      ctx.drawImage(img, 0, 0);
+      const jpeg = await new Promise<Blob>((resolve, reject) => {
+        canvas.toBlob((value) => value ? resolve(value) : reject(new Error("IMAGE_CONVERSION_ERROR: não foi possível criar JPEG.")), "image/jpeg", 0.9);
+      });
+
+      const bytes = new Uint8Array(await jpeg.arrayBuffer());
+      if (!isImageBytes(bytes, "image/jpeg")) {
+        throw new Error("IMAGE_CONVERSION_ERROR: JPEG resultante inválido.");
+      }
+
+      return jpeg;
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
   }
 
   async function fetchCaptionText(format: "srt" | "vtt") {
@@ -349,34 +449,6 @@ export default function Home() {
       .toUpperCase() || "PROJETO";
   }
 
-  function validateStoryboard(scenes: Scene[]) {
-    const errors: string[] = [];
-    if (!scenes.length) errors.push("O storyboard não contém cenas.");
-    scenes.forEach((scene, i) => {
-      if (!scene.id) errors.push("Cena " + (i + 1) + ": id em falta.");
-      if (!scene.narration?.trim()) errors.push("Cena " + (i + 1) + ": narração em falta.");
-      if (!(Number(scene.duration) > 0)) errors.push("Cena " + (i + 1) + ": duração inválida.");
-      if (!scene.visualPrompt?.trim() && !scene.searchQueries?.length) {
-        errors.push("Cena " + (i + 1) + ": prompt/query visual em falta.");
-      }
-      if (!scene.camera?.trim()) errors.push("Cena " + (i + 1) + ": câmera em falta.");
-      if (!scene.transition?.trim()) errors.push("Cena " + (i + 1) + ": transição em falta.");
-    });
-    return errors;
-  }
-
-  function validateCaptionText(text: string, format: "srt" | "vtt", expected: number) {
-    if (!text.trim()) return "Legenda " + format.toUpperCase() + " vazia.";
-    const cueCount = format === "vtt"
-      ? (text.match(/\d{2}:\d{2}:\d{2}\.\d{3}\s+-->\s+/g) || []).length
-      : (text.match(/\d{2}:\d{2}:\d{2},\d{3}\s+-->\s+/g) || []).length;
-    if (cueCount !== expected) {
-      return "Legenda " + format.toUpperCase() + " incompleta: " + cueCount + "/" + expected + " cues.";
-    }
-    if (/-->\s*-->/.test(text)) return "Legenda " + format.toUpperCase() + " contém timestamps inválidos.";
-    return "";
-  }
-
   async function exportCapCutPackage() {
     if (!data || packageBusy) return;
 
@@ -386,7 +458,9 @@ export default function Home() {
 
     try {
       const storyboardErrors = validateStoryboard(data.scenes);
+      setExportValidation({ status: "pending", errors: [] });
       if (storyboardErrors.length) {
+        setExportValidation({ status: "blocked", errors: storyboardErrors });
         throw new Error("EXPORTAÇÃO BLOQUEADA — storyboard inválido.\\n\\n" + storyboardErrors.join("\\n"));
       }
 
@@ -427,7 +501,7 @@ export default function Home() {
         } else {
           try {
             const imageBlob = await fetchExportAsset(imageUrl);
-            imageBlobs[scene.id] = imageBlob;
+            imageBlobs[scene.id] = await normalizeImageToJpeg(imageBlob);
           } catch (e) {
             validationErrors.push(
               sceneLabel + ": imagem não pôde ser descarregada (" +
@@ -447,11 +521,13 @@ export default function Home() {
           try {
             const audioResponse = await fetch(voiceUrl);
             if (!audioResponse.ok) throw new Error("AUDIO_DOWNLOAD_ERROR: resposta " + audioResponse.status + ".");
+            const contentType = String(audioResponse.headers.get("content-type") || "").split(";")[0].toLowerCase();
             const audioBlob = await audioResponse.blob();
-            if (!audioBlob.size || !String(audioBlob.type || "").startsWith("audio/")) {
-              throw new Error("AUDIO_DOWNLOAD_ERROR: ficheiro de áudio vazio ou Content-Type inválido.");
+            const audioBytes = new Uint8Array(await audioBlob.arrayBuffer());
+            if (!audioBlob.size || !isMp3Bytes(audioBytes, contentType)) {
+              throw new Error("AUDIO_DOWNLOAD_ERROR: ficheiro de áudio vazio, não-MP3 ou Content-Type inválido.");
             }
-            audioBlobs[scene.id] = audioBlob;
+            audioBlobs[scene.id] = new Blob([audioBytes], { type: "audio/mpeg" });
           } catch (e) {
             validationErrors.push(
               sceneLabel + ": áudio não pôde ser descarregado (" +
@@ -478,12 +554,14 @@ export default function Home() {
 
       const srt = await fetchCaptionText("srt");
       const vtt = await fetchCaptionText("vtt");
-      const srtError = validateCaptionText(srt, "srt", totalScenes);
-      const vttError = validateCaptionText(vtt, "vtt", totalScenes);
-      if (srtError || vttError) {
+      const srtErrors = validateCaptionText(srt, "srt", totalScenes);
+      const vttErrors = validateCaptionText(vtt, "vtt", totalScenes);
+      if (srtErrors.length || vttErrors.length) {
+        const captionErrors = [...srtErrors, ...vttErrors];
+        setExportValidation({ status: "blocked", errors: captionErrors });
         throw new Error(
           "EXPORTAÇÃO BLOQUEADA — legendas inválidas.\\n\\n" +
-          [srtError, vttError].filter(Boolean).join("\\n")
+          captionErrors.join("\\n")
         );
       }
 
@@ -507,8 +585,10 @@ export default function Home() {
         };
       });
 
-      if (timeline.length !== totalScenes || timeline.some((item) => !(item.end > item.start))) {
-        throw new Error("EXPORTAÇÃO BLOQUEADA — timeline inválida.");
+      const timelineErrors = validateTimeline(timeline, totalScenes);
+      if (timelineErrors.length) {
+        setExportValidation({ status: "blocked", errors: timelineErrors });
+        throw new Error("EXPORTAÇÃO BLOQUEADA — timeline inválida.\\n\\n" + timelineErrors.join("\\n"));
       }
 
       const fullScript = data.scenes.map((s) => s.narration.trim()).join("\n\n");
@@ -574,7 +654,7 @@ export default function Home() {
         settings,
         analysis: data,
         visualSources: visualMeta,
-        assetErrors,
+        generationErrors,
         exportedAt: new Date().toISOString(),
       }, null, 2));
       zip.file("full-script.txt", fullScript);
@@ -591,6 +671,7 @@ export default function Home() {
         "REGRA: se qualquer asset estivesse em falta ou inválido, o ZIP não seria criado.",
       ].join("\n"));
 
+      setExportValidation({ status: "complete", errors: [] });
       setProgress("100% validado. A compactar o projeto…");
       const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
       if (!blob.size) throw new Error("EXPORTAÇÃO BLOQUEADA — ZIP vazio.");
@@ -603,7 +684,11 @@ export default function Home() {
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       setProgress("100% completo — pacote CapCut pronto com " + totalScenes + "/" + totalScenes + " cenas.");
     } catch (e) {
-      setProgress(e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.");
+      const message = e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.";
+      if (!message.startsWith("EXPORTAÇÃO BLOQUEADA")) {
+        setExportValidation({ status: "blocked", errors: [message] });
+      }
+      setProgress(message);
     } finally {
       setPackageBusy(false);
       setBusy(false);
@@ -755,6 +840,27 @@ export default function Home() {
                 <button className="primary small" onClick={startRender}>🎬 RENDER MP4</button>
               </div>
               {renderStatus && <div className="render-box"><b>{renderStatus}</b>{renderId && <small>Job: {renderId}</small>}</div>}
+              <div className={"validation-box " + exportValidation.status}>
+                <div className="validation-title">VALIDAÇÃO DO PROJETO</div>
+                <div className="validation-grid">
+                  <span>Storyboard <b>{data.scenes.length}/{data.scenes.length}</b></span>
+                  <span>Imagens <b>{visualCount}/{data.scenes.length}</b></span>
+                  <span>Áudio <b>{voiceCount}/{data.scenes.length}</b></span>
+                  <span>SRT <b>{exportValidation.status === "complete" ? "✓ válido" : "pendente"}</b></span>
+                  <span>VTT <b>{exportValidation.status === "complete" ? "✓ válido" : "pendente"}</b></span>
+                  <span>Timeline <b>{exportValidation.status === "complete" ? data.scenes.length + "/" + data.scenes.length : "pendente"}</b></span>
+                </div>
+                <div className="validation-status">
+                  {exportValidation.status === "complete"
+                    ? "100% COMPLETO"
+                    : exportValidation.status === "blocked"
+                      ? "EXPORTAÇÃO BLOQUEADA"
+                      : "VALIDAÇÃO PENDENTE"}
+                </div>
+                {exportValidation.errors.length > 0 && (
+                  <div className="validation-errors">{exportValidation.errors.slice(0, 8).map((error, i) => <div key={i}>✗ {error}</div>)}</div>
+                )}
+              </div>
               <div className="pb">
                 <div className="scenes">
                   {visibleScenes.map((s) => (

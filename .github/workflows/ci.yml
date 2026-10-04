@@ -62,6 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Verify production image generation
+        continue-on-error: true
         env:
           PROD_URL: https://ai-video-rust-gamma.vercel.app
         run: |

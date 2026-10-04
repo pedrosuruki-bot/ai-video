@@ -3,7 +3,7 @@ import { getOpenAI } from "@/lib/openai";
 import { fallback } from "@/lib/analyze";
 import type { Settings, Scene } from "@/lib/types";
 
-const DEFAULT_MODEL = "gpt-5.6-luna";
+const DEFAULT_MODEL = "gpt-6-luna";
 
 export async function POST(req: Request) {
   const body = (await req.json()) as { script?: string; settings?: Settings };

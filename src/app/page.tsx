@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import JSZip from "jszip";
 import type { Analysis, AssetError, Scene, Settings } from "@/lib/types";
 import { isImageBytes, isMp3Bytes, validateCaptionText, validateStoryboard, validateTimeline } from "@/lib/export-validation";
+import { readValidAudioResponse } from "@/lib/media-http";
 
 const demo =
   "Há uma razão pela qual algumas coisas que vemos todos os dias parecem completamente normais. " +
@@ -271,11 +272,13 @@ export default function Home() {
         return null;
       }
 
-      const contentType = String(r.headers.get("content-type") || "").split(";")[0].toLowerCase();
-      if (contentType !== "audio/mpeg" && contentType !== "audio/mp3") {
+      let blob: Blob;
+      try {
+        blob = await readValidAudioResponse(r);
+      } catch (error) {
         report({
           code: "AUDIO_RESPONSE_INVALID",
-          message: "A API respondeu com Content-Type inesperado: " + (contentType || "ausente") + ".",
+          message: error instanceof Error ? error.message : "A resposta TTS é inválida.",
           stage: "audio",
           provider: "OpenAI",
           retryable: false,
@@ -283,20 +286,7 @@ export default function Home() {
         return null;
       }
 
-      const blob = await r.blob();
-      const bytes = new Uint8Array(await blob.arrayBuffer());
-      if (!blob.size || !isMp3Bytes(bytes, contentType)) {
-        report({
-          code: "AUDIO_RESPONSE_INVALID",
-          message: "A API devolveu um áudio vazio ou que não é um MP3 utilizável.",
-          stage: "audio",
-          provider: "OpenAI",
-          retryable: false,
-        });
-        return null;
-      }
-
-      const url = URL.createObjectURL(new Blob([bytes], { type: "audio/mpeg" }));
+      const url = URL.createObjectURL(blob);
       const old = voices[scene.id];
       if (old) URL.revokeObjectURL(old);
       setVoices((v) => ({ ...v, [scene.id]: url }));

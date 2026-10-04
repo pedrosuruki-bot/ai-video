@@ -1,1 +1,14 @@
-import OpenAI from "openai"; let client:OpenAI|null=null; export function getOpenAI(){if(!process.env.OPENAI_API_KEY)return null; return client??=(new OpenAI({apiKey:process.env.OPENAI_API_KEY}));}
+import OpenAI from "openai";
+
+let client: OpenAI | null = null;
+
+export function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+
+  return client ??= new OpenAI({
+    apiKey,
+    timeout: 45000,
+    maxRetries: 0,
+  });
+}

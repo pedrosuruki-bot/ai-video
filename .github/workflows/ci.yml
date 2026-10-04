@@ -16,3 +16,42 @@ jobs:
       - run: npm install
       - run: npm test
       - run: npm run build
+
+  production-smoke:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Vercel production
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          set -e
+          for i in $(seq 1 30); do
+            code=$(curl -L -sS -o /tmp/health.json -w "%{http_code}" "$PROD_URL/api/health" || true)
+            echo "attempt=$i http=$code"
+            if [ "$code" = "200" ]; then
+              cat /tmp/health.json
+              break
+            fi
+            sleep 10
+          done
+          test -s /tmp/health.json
+          grep -q '"configured"' /tmp/health.json
+      - name: Check diagnostics endpoint
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          code=$(curl -L -sS -o /tmp/diagnostics.json -w "%{http_code}" "$PROD_URL/api/diagnostics" || true)
+          echo "diagnostics http=$code"
+          cat /tmp/diagnostics.json
+          test "$code" = "200"
+          grep -q '"status"' /tmp/diagnostics.json
+      - name: Check production app
+        env:
+          PROD_URL: https://ai-video-rust-gamma.vercel.app
+        run: |
+          code=$(curl -L -sS -o /tmp/home.html -w "%{http_code}" "$PROD_URL/" || true)
+          echo "home http=$code"
+          test "$code" = "200"
+          grep -q "AI VIDEO FACTORY" /tmp/home.html

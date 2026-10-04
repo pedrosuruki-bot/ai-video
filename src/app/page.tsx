@@ -680,10 +680,47 @@ export default function Home() {
         "REGRA: se qualquer asset estivesse em falta ou inválido, o ZIP não seria criado.",
       ].join("\n"));
 
-      setExportValidation({ status: "complete", errors: [] });
       setProgress("100% validado. A compactar o projeto…");
       const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
       if (!blob.size) throw new Error("EXPORTAÇÃO BLOQUEADA — ZIP vazio.");
+
+      const verifiedZip = await JSZip.loadAsync(blob);
+      const requiredFiles = [
+        ...data.scenes.flatMap((scene) => {
+          const number = String(scene.index).padStart(3, "0");
+          return ["media/images/" + number + ".jpg", "media/audio/" + number + ".mp3"];
+        }),
+        "captions.srt",
+        "captions.vtt",
+        "timeline.csv",
+        "storyboard.json",
+        "full-script.txt",
+        "GUIA-CAPCUT.txt",
+        "VALIDACAO-100.txt",
+      ];
+      const missingFiles: string[] = [];
+      for (const filename of requiredFiles) {
+        const entry = verifiedZip.file(filename);
+        if (!entry) {
+          missingFiles.push("Ficheiro ZIP em falta: " + filename);
+          continue;
+        }
+        const bytes = await entry.async("uint8array");
+        if (!bytes.length) missingFiles.push("Ficheiro ZIP vazio: " + filename);
+        if (filename.startsWith("media/images/") && !isImageBytes(bytes, "image/jpeg")) {
+          missingFiles.push("Imagem ZIP inválida: " + filename);
+        }
+        if (filename.startsWith("media/audio/") && !isMp3Bytes(bytes, "audio/mpeg")) {
+          missingFiles.push("Áudio ZIP inválido: " + filename);
+        }
+      }
+
+      if (missingFiles.length) {
+        setExportValidation({ status: "blocked", errors: missingFiles });
+        throw new Error("EXPORTAÇÃO BLOQUEADA — verificação final do ZIP falhou.\\n\\n" + missingFiles.join("\\n"));
+      }
+
+      setExportValidation({ status: "complete", errors: [] });
 
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

@@ -69,6 +69,14 @@ export async function POST(req: Request) {
       transition: String(s.transition || "Soft cut"),
     }));
 
+    const storyboardErrors = scenes.length
+      ? scenes.flatMap((scene, i) => [
+          !scene.narration.trim() ? "Cena " + (i + 1) + ": narração em falta." : "",
+          !(scene.duration > 0) ? "Cena " + (i + 1) + ": duração inválida." : "",
+          !scene.visualPrompt.trim() && !scene.searchQueries.length ? "Cena " + (i + 1) + ": visualPrompt/searchQueries em falta." : "",
+        ]).filter(Boolean)
+      : ["A IA não devolveu cenas."];
+
     return NextResponse.json({
       title: String(parsed.title || "Novo vídeo"),
       summary: String(parsed.summary || ""),
@@ -76,9 +84,20 @@ export async function POST(req: Request) {
       estimatedDuration: scenes.reduce((total, scene) => total + scene.duration, 0),
       scenes,
       mode: "ai",
+      storyboardValid: storyboardErrors.length === 0,
+      storyboardErrors,
     });
   } catch (error) {
-    console.error("Storyboard AI error:", error);
-    return NextResponse.json(fallback(script, settings));
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("Storyboard AI error", { code: "ANALYZE_PROVIDER_ERROR", message: detail });
+    return NextResponse.json({
+      ...fallback(script, settings),
+      storyboardValid: true,
+      storyboardErrors: [],
+      fallbackReason: {
+        code: "ANALYZE_PROVIDER_ERROR",
+        message: "A geração de storyboard IA falhou; foi usado o storyboard local.",
+      },
+    });
   }
 }

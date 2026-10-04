@@ -231,13 +231,26 @@ export default function Home() {
     setBusy(true);
 
     try {
+      /*
+       * REGRA DE 100%:
+       * O ZIP NUNCA É COMPRIMIDO se existir uma única cena sem imagem
+       * ou áudio válido. Também validamos SRT/VTT antes de criar o ZIP.
+       * Nada de pacotes "quase prontos". Humanos já têm ficheiros
+       * suficientes chamados final_v2_REAL_FINAL_agora.zip.
+       */
       const zip = new JSZip();
       const imageMap: Record<string, string> = { ...visuals };
       const voiceMap: Record<string, string> = { ...voices };
+      const imageBlobs: Record<string, Blob> = {};
+      const audioBlobs: Record<string, Blob> = {};
+      const validationErrors: string[] = [];
 
       for (let i = 0; i < data.scenes.length; i++) {
         const scene = data.scenes[i];
-        setProgress("A preparar assets " + (i + 1) + "/" + data.scenes.length + "…");
+        const sceneLabel = "Cena " + String(scene.index).padStart(3, "0");
+        setProgress(
+          "A preparar assets " + (i + 1) + "/" + data.scenes.length + "…"
+        );
 
         if (!imageMap[scene.id]) {
           const url = await generateVisual(scene);
@@ -250,27 +263,84 @@ export default function Home() {
         }
 
         const imageUrl = imageMap[scene.id];
-        if (imageUrl) {
+        if (!imageUrl) {
+          validationErrors.push(sceneLabel + ": imagem em falta.");
+        } else {
           try {
             const imageBlob = await fetchExportAsset(imageUrl);
-            zip.file("media/images/" + String(scene.index).padStart(3, "0") + ".jpg", imageBlob);
-          } catch {
-            zip.file(
-              "media/images/" + String(scene.index).padStart(3, "0") + "-SOURCE.txt",
-              imageUrl
+            if (!imageBlob.size) {
+              throw new Error("ficheiro de imagem vazio.");
+            }
+            imageBlobs[scene.id] = imageBlob;
+          } catch (e) {
+            validationErrors.push(
+              sceneLabel +
+                ": imagem não pôde ser descarregada (" +
+                (e instanceof Error ? e.message : "erro desconhecido") +
+                ")."
             );
           }
         }
 
         const voiceUrl = voiceMap[scene.id];
-        if (voiceUrl) {
-          const audioBlob = await fetch(voiceUrl).then((x) => x.blob());
-          zip.file("media/audio/" + String(scene.index).padStart(3, "0") + ".mp3", audioBlob);
+        if (!voiceUrl) {
+          validationErrors.push(sceneLabel + ": áudio em falta.");
+        } else {
+          try {
+            const audioResponse = await fetch(voiceUrl);
+            if (!audioResponse.ok) {
+              throw new Error("resposta " + audioResponse.status + ".");
+            }
+            const audioBlob = await audioResponse.blob();
+            if (!audioBlob.size) {
+              throw new Error("ficheiro de áudio vazio.");
+            }
+            audioBlobs[scene.id] = audioBlob;
+          } catch (e) {
+            validationErrors.push(
+              sceneLabel +
+                ": áudio não pôde ser descarregado (" +
+                (e instanceof Error ? e.message : "erro desconhecido") +
+                ")."
+            );
+          }
         }
+      }
+
+      const totalScenes = data.scenes.length;
+      const validImages = Object.keys(imageBlobs).length;
+      const validAudio = Object.keys(audioBlobs).length;
+
+      if (validImages !== totalScenes) {
+        validationErrors.push(
+          "Imagens: " + validImages + "/" + totalScenes + " válidas."
+        );
+      }
+
+      if (validAudio !== totalScenes) {
+        validationErrors.push(
+          "Áudio: " + validAudio + "/" + totalScenes + " válidos."
+        );
+      }
+
+      if (validationErrors.length > 0) {
+        throw new Error(
+          "EXPORTAÇÃO BLOQUEADA — o projeto não está 100% completo.\n\n" +
+            validationErrors.slice(0, 12).join("\n") +
+            (validationErrors.length > 12
+              ? "\n… e mais " + (validationErrors.length - 12) + " erro(s)."
+              : "")
+        );
       }
 
       const srt = await fetchCaptionText("srt");
       const vtt = await fetchCaptionText("vtt");
+
+      if (!srt.trim() || !vtt.trim()) {
+        throw new Error(
+          "EXPORTAÇÃO BLOQUEADA — as legendas SRT/VTT não foram geradas corretamente."
+        );
+      }
 
       let cursor = 0;
       const timeline = data.scenes.map((scene) => {
@@ -311,22 +381,35 @@ export default function Home() {
         ),
       ].join("\n");
 
+      if (timeline.length !== totalScenes) {
+        throw new Error(
+          "EXPORTAÇÃO BLOQUEADA — timeline incompleta: " +
+            timeline.length +
+            "/" +
+            totalScenes +
+            " cenas."
+        );
+      }
+
       const guide = [
         "AI VIDEO FACTORY — PACOTE CAPCUT",
         "",
-        "Este pacote foi preparado para montagem no CapCut.",
+        "VALIDAÇÃO: 100% COMPLETA",
+        "Este pacote só foi criado porque todas as cenas passaram na validação.",
+        "",
         "Formato: " + settings.aspectRatio,
         "Resolução alvo: " + settings.resolution,
         "FPS: 30",
         "Idioma: " + settings.language,
         "",
         "CONTEÚDO",
-        "- media/images/: uma imagem por cena, em ordem numérica.",
-        "- media/audio/: uma narração MP3 por cena, em ordem numérica.",
+        "- media/images/: uma imagem válida por cena, em ordem numérica.",
+        "- media/audio/: uma narração MP3 válida por cena, em ordem numérica.",
         "- captions.srt: legendas sincronizadas.",
         "- captions.vtt: versão WebVTT.",
         "- timeline.csv: início, fim, duração e ficheiros de cada cena.",
         "- storyboard.json: prompts, narrativa e definições.",
+        "- full-script.txt: roteiro completo.",
         "",
         "MONTAGEM",
         "1. Importe as imagens pela ordem numérica.",
@@ -338,31 +421,85 @@ export default function Home() {
         "NOTA: as imagens podem ser IA ou stock. A fonte/licença aparece no storyboard.json.",
       ].join("\n");
 
+      // Só depois de TODA a validação passar é que adicionamos ficheiros ao ZIP.
+      for (const scene of data.scenes) {
+        const number = String(scene.index).padStart(3, "0");
+        zip.file("media/images/" + number + ".jpg", imageBlobs[scene.id]);
+        zip.file("media/audio/" + number + ".mp3", audioBlobs[scene.id]);
+      }
+
       zip.file("captions.srt", srt);
       zip.file("captions.vtt", vtt);
       zip.file("timeline.csv", csv);
-      zip.file("storyboard.json", JSON.stringify({
-        app: "AI Video Factory",
-        version: "0.3-capcut",
-        settings,
-        analysis: data,
-        visualSources: visualMeta,
-        exportedAt: new Date().toISOString(),
-      }, null, 2));
-      zip.file("full-script.txt", data.scenes.map((s) => s.narration).join("\n\n"));
+      zip.file(
+        "storyboard.json",
+        JSON.stringify(
+          {
+            app: "AI Video Factory",
+            version: "0.4-capcut-100-percent",
+            validation: {
+              status: "100%",
+              scenes: totalScenes,
+              images: validImages,
+              audio: validAudio,
+              captions: "SRT + VTT",
+            },
+            settings,
+            analysis: data,
+            visualSources: visualMeta,
+            exportedAt: new Date().toISOString(),
+          },
+          null,
+          2
+        )
+      );
+      zip.file(
+        "full-script.txt",
+        data.scenes.map((s) => s.narration).join("\n\n")
+      );
       zip.file("GUIA-CAPCUT.txt", guide);
+      zip.file(
+        "VALIDACAO-100.txt",
+        [
+          "EXPORTAÇÃO VALIDADA: 100%",
+          "",
+          "Cenas: " + totalScenes + "/" + totalScenes,
+          "Imagens válidas: " + validImages + "/" + totalScenes,
+          "Áudios válidos: " + validAudio + "/" + totalScenes,
+          "Legendas: SRT + VTT",
+          "Timeline: " + timeline.length + "/" + totalScenes + " cenas",
+          "",
+          "REGRA: se algum asset estivesse em falta ou inválido, o ZIP não seria criado.",
+        ].join("\n")
+      );
 
-      setProgress("A compactar o projeto…");
+      setProgress("100% validado. A compactar o projeto…");
       const blob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+      if (!blob.size) {
+        throw new Error(
+          "EXPORTAÇÃO BLOQUEADA — o ZIP final foi criado sem conteúdo válido."
+        );
+      }
+
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
       a.download = "VYNKO_" + slugify(data.title) + "_CAPCUT.zip";
       a.click();
       URL.revokeObjectURL(url);
-      setProgress("Pacote CapCut pronto: imagens, voz, SRT, VTT e timeline.");
+      setProgress(
+        "100% completo — pacote CapCut pronto com " +
+          totalScenes +
+          "/" +
+          totalScenes +
+          " cenas."
+      );
     } catch (e) {
-      setProgress(e instanceof Error ? e.message : "Falha ao criar o pacote CapCut.");
+      setProgress(
+        e instanceof Error
+          ? e.message
+          : "Falha ao criar o pacote CapCut."
+      );
     } finally {
       setPackageBusy(false);
       setBusy(false);

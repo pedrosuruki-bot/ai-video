@@ -15,41 +15,49 @@ function wikimediaSize(aspectRatio: string) {
 }
 
 async function searchWikimedia(query: string) {
-  const params = new URLSearchParams({
-    action: "query",
-    generator: "search",
-    gsrsearch: query,
-    gsrnamespace: "6",
-    gsrlimit: "5",
-    prop: "imageinfo",
-    iiprop: "url|mime|extmetadata|size",
-    iiurlwidth: "1280",
-    format: "json",
-    origin: "*",
-  });
+  const candidates = Array.from(new Set([
+    query.trim(),
+    query.trim().split(/[,;:.!?]/)[0].split(/\s+/).slice(0, 6).join(" "),
+  ].filter((x) => x.length >= 3)));
 
-  const res = await fetch("https://commons.wikimedia.org/w/api.php?" + params.toString(), {
-    headers: { "User-Agent": "AI-Video-Factory/1.0" },
-    cache: "no-store",
-  });
-
-  if (!res.ok) throw new Error("Wikimedia Commons não respondeu.");
-  const data = await res.json();
-  const pages = Object.values((data?.query?.pages || {}) as Record<string, any>);
-
-  return pages
-    .filter((p: any) => p.imageinfo?.[0]?.url && /^image\//.test(p.imageinfo[0].mime || ""))
-    .map((p: any) => {
-      const info = p.imageinfo[0];
-      const meta = info.extmetadata || {};
-      return {
-        title: String(p.title || "").replace(/^File:/, ""),
-        imageUrl: info.thumburl || info.url,
-        pageUrl: info.descriptionurl || ("https://commons.wikimedia.org/wiki/" + encodeURIComponent(p.title)),
-        license: meta.LicenseShortName?.value || meta.License?.value || "Wikimedia Commons",
-        artist: meta.Artist?.value ? String(meta.Artist.value).replace(/<[^>]+>/g, "") : "",
-      };
+  for (const candidate of candidates) {
+    const params = new URLSearchParams({
+      action: "query",
+      generator: "search",
+      gsrsearch: candidate,
+      gsrnamespace: "6",
+      gsrlimit: "5",
+      prop: "imageinfo",
+      iiprop: "url|mime|extmetadata|size",
+      iiurlwidth: "1280",
+      format: "json",
+      origin: "*",
     });
+
+    const res = await fetch("https://commons.wikimedia.org/w/api.php?" + params.toString(), {
+      headers: { "User-Agent": "AI-Video-Factory/1.0 (visual search)" },
+      cache: "no-store",
+    });
+
+    if (!res.ok) throw new Error("Wikimedia Commons não respondeu.");
+    const data = await res.json();
+    const pages = Object.values((data?.query?.pages || {}) as Record<string, any>);
+    const results = pages
+      .filter((p: any) => p.imageinfo?.[0]?.url && /^image\//.test(p.imageinfo[0].mime || ""))
+      .map((p: any) => {
+        const info = p.imageinfo[0];
+        const meta = info.extmetadata || {};
+        return {
+          title: String(p.title || "").replace(/^File:/, ""),
+          imageUrl: info.thumburl || info.url,
+          pageUrl: info.descriptionurl || ("https://commons.wikimedia.org/wiki/" + encodeURIComponent(p.title)),
+          license: meta.LicenseShortName?.value || meta.License?.value || "Wikimedia Commons",
+          artist: meta.Artist?.value ? String(meta.Artist.value).replace(/<[^>]+>/g, "") : "",
+        };
+      });
+    if (results.length) return results;
+  }
+  return [];
 }
 
 export async function POST(req: Request) {

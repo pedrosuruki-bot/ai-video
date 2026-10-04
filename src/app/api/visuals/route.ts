@@ -164,7 +164,12 @@ async function searchWikimedia(query: string) {
       .filter((item) => {
         try {
           const host = new URL(item.imageUrl).hostname;
-          return IMAGE_HOSTS.has(host) && item.imageUrl.startsWith("https://");
+          const mime = item.mime.toLowerCase();
+          return IMAGE_HOSTS.has(host) &&
+            item.imageUrl.startsWith("https://") &&
+            item.size > 0 &&
+            item.size <= 15 * 1024 * 1024 &&
+            ["image/jpeg", "image/png", "image/webp", "image/gif"].includes(mime);
         } catch {
           return false;
         }

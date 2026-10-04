@@ -1,4 +1,7 @@
 import { NextResponse } from "next/server";
+
+export const runtime = "nodejs";
+export const maxDuration = 90;
 import { getOpenAI } from "@/lib/openai";
 import { fallback } from "@/lib/analyze";
 import type { Settings, Scene } from "@/lib/types";

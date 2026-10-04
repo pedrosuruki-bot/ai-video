@@ -14,6 +14,29 @@ function wikimediaSize(aspectRatio: string) {
   return "1536x1024";
 }
 
+function classifyProviderError(error: any) {
+  const status = Number(error?.status || error?.statusCode || 0);
+  const message = String(error?.message || error || "Erro desconhecido.");
+  const lower = message.toLowerCase();
+  if (status === 401 || status === 403 || /invalid.*key|api key|authentication|unauthorized/.test(lower)) {
+    return { code: "OPENAI_AUTH_ERROR", message: "A autenticação da OpenAI falhou.", retryable: false };
+  }
+  if (status === 429 || /rate limit|quota|billing|credit|insufficient|spend limit/.test(lower)) {
+    return { code: /billing|credit|quota|spend/.test(lower) ? "OPENAI_BILLING_ERROR" : "OPENAI_RATE_LIMIT", message: status === 429 ? "A OpenAI recusou o pedido por limite, quota ou billing." : message, retryable: status === 429 };
+  }
+  if (/model.*(not found|does not exist|unavailable)|unknown model/.test(lower)) {
+    return { code: "OPENAI_MODEL_UNAVAILABLE", message: "O modelo de imagens configurado não está disponível para esta API.", retryable: false };
+  }
+  if (status >= 500 || /timeout|timed out|network|fetch failed|temporar/.test(lower)) {
+    return { code: "IMAGE_PROVIDER_ERROR", message: "O serviço de imagens teve um erro temporário.", retryable: true };
+  }
+  return { code: "IMAGE_PROVIDER_ERROR", message: message, retryable: false };
+}
+
+async function sleep(ms: number) {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function searchWikimedia(query: string) {
   const candidates = Array.from(new Set([
     query.trim(),
@@ -34,12 +57,29 @@ async function searchWikimedia(query: string) {
       origin: "*",
     });
 
-    const res = await fetch("https://commons.wikimedia.org/w/api.php?" + params.toString(), {
-      headers: { "User-Agent": "AI-Video-Factory/1.0 (visual search)" },
-      cache: "no-store",
-    });
+    let res: Response | null = null;
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 10000);
+        res = await fetch("https://commons.wikimedia.org/w/api.php?" + params.toString(), {
+          headers: { "User-Agent": "AI-Video-Factory/1.0 (visual search)" },
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        clearTimeout(timer);
+        if (res.ok) break;
+        lastError = "HTTP " + res.status;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+      if (attempt === 0) await sleep(500);
+    }
 
-    if (!res.ok) throw new Error("Wikimedia Commons não respondeu.");
+    if (!res || !res.ok) {
+      throw new Error("Wikimedia Commons não respondeu (" + lastError + ").");
+    }
     const data = await res.json();
     const pages = Object.values((data?.query?.pages || {}) as Record<string, any>);
     const results = pages
@@ -89,12 +129,20 @@ export async function POST(req: Request) {
 
   const ai = getOpenAI();
   if (!ai) {
-    return NextResponse.json({ error: "Configure OPENAI_API_KEY para gerar imagens com IA." }, { status: 503 });
+    return NextResponse.json({
+      error: "Configure OPENAI_API_KEY para gerar imagens com IA.",
+      code: "OPENAI_AUTH_ERROR",
+      stage: "image",
+    }, { status: 503 });
   }
 
-  try {
-    const image = await (ai.images.generate as any)({
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-flare",
+  const imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-flare";
+  let lastError: any = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const image = await (ai.images.generate as any)({
+      model: imageModel,
       prompt:
         "Create a cinematic, realistic editorial visual for a long-form YouTube documentary. " +
         "No text, no logos, no watermark, no collage, no split screen. " +
@@ -106,17 +154,28 @@ export async function POST(req: Request) {
       output_compression: 65,
     });
 
-    const b64 = image?.data?.[0]?.b64_json;
-    if (!b64) throw new Error("A API não devolveu imagem.");
+      const b64 = image?.data?.[0]?.b64_json;
+      if (!b64) throw new Error("A API não devolveu imagem.");
 
-    return NextResponse.json({
-      mode: "ai",
-      source: "OpenAI",
-      imageUrl: "data:image/jpeg;base64," + b64,
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2.5-flare",
-    });
-  } catch (error) {
-    console.error("OpenAI image error:", error);
+      return NextResponse.json({
+        mode: "ai",
+        source: "OpenAI",
+        imageUrl: "data:image/jpeg;base64," + b64,
+        model: imageModel,
+      });
+    } catch (error) {
+      lastError = error;
+      const classified = classifyProviderError(error);
+      console.error("OpenAI image error", {
+        code: classified.code,
+        message: classified.message,
+        status: Number((error as any)?.status || 0),
+        model: imageModel,
+      });
+      if (!classified.retryable || attempt === 1) break;
+      await sleep(700);
+    }
+  }
 
     // AI image generation can fail because of temporary provider limits,
     // billing/quota, or model availability. For a usable CapCut export,
@@ -131,20 +190,49 @@ export async function POST(req: Request) {
 
       const results = await searchWikimedia(fallbackQuery);
       if (results.length) {
+        const classified = classifyProviderError(lastError);
         return NextResponse.json({
           mode: "stock",
           source: "Wikimedia Commons (fallback)",
           warning: "A imagem IA falhou; foi usada uma imagem de stock/licenciada como fallback.",
+          originalProviderError: {
+            code: classified.code,
+            message: classified.message,
+          },
+          fallbackProvider: "Wikimedia Commons",
+          fallbackQuery: fallbackQuery,
           results,
           selected: results[0],
         });
       }
     } catch (fallbackError) {
-      console.error("Wikimedia fallback error:", fallbackError);
+      console.error("Wikimedia fallback error", fallbackError);
+      const classified = classifyProviderError(lastError);
+      return NextResponse.json({
+        error: "A imagem IA falhou e o fallback Wikimedia também falhou.",
+        code: "WIKIMEDIA_SEARCH_ERROR",
+        stage: "image",
+        provider: "Wikimedia Commons",
+        originalProviderError: {
+          code: classified.code,
+          message: classified.message,
+        },
+        detail: fallbackError instanceof Error ? fallbackError.message : String(fallbackError),
+      }, { status: 502 });
     }
 
+    const classified = classifyProviderError(lastError);
     return NextResponse.json({
       error: "A imagem IA falhou e não foi encontrado fallback no Wikimedia Commons.",
+      code: classified.code,
+      stage: "image",
+      provider: "OpenAI",
+      originalProviderError: {
+        code: classified.code,
+        message: classified.message,
+      },
+      fallbackProvider: "Wikimedia Commons",
+      fallbackQuery: fallbackQuery,
     }, { status: 502 });
   }
 }
